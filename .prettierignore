@@ -1,0 +1,18 @@
+# Package Managers
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+bun.lock
+bun.lockb
+
+# Skill reference templates (contain +++ markup that prettier cannot parse)
+/.cursor/
+/.gemini/
+/.github/skills/
+
+# Miscellaneous
+/static/
+
+# Environment files (no prettier parser)
+/.env
+/.env.example

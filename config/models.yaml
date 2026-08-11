@@ -1,0 +1,48 @@
+# LLM provider + model routing configuration.
+# Values here override the built-in defaults in server/config/models.ts.
+# Each chain role maps to an OpenRouter account (1..4) whose key lives in
+# OPENROUTER_API_KEY / _2 / _3 / _4. Account numbers are the billing/rate-limit
+# bucket for that chain role. When a role's account key is missing the router
+# falls back to the first configured OpenRouter key; with no keys at all it
+# degrades to the local provider.
+
+models:
+  conversation:
+    provider: openrouter
+    model: openai/gpt-4o-mini
+  planning:
+    provider: openrouter
+    model: openai/gpt-4o-mini
+  reasoning:
+    provider: openrouter
+    model: openai/gpt-4o-mini
+  coding:
+    provider: openrouter
+    model: openai/gpt-4o-mini
+  vision:
+    provider: openrouter
+    model: openai/gpt-4o-mini
+  summarization:
+    provider: openrouter
+    model: openai/gpt-4o-mini
+  extraction:
+    provider: openrouter
+    model: openai/gpt-4o-mini
+
+chain:
+  planner:
+    provider: openrouter
+    account: 1
+    model: openai/gpt-4o-mini
+  executor:
+    provider: openrouter
+    account: 2
+    model: anthropic/claude-3.5-haiku
+  critic:
+    provider: openrouter
+    account: 3
+    model: deepseek/deepseek-chat
+  optimizer:
+    provider: openrouter
+    account: 4
+    model: qwen/qwen-2.5-72b-instruct
