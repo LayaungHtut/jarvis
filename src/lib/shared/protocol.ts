@@ -17,9 +17,7 @@ export type ClientMessage =
 	| { type: 'cancel_task'; task_id?: string }
 	| { type: 'permission_response'; request_id: string; granted: boolean }
 	| { type: 'set_trust'; trusted: boolean }
-	| { type: 'set_voice'; enabled: boolean }
-	| { type: 'request_snapshot' }
-	| { type: 'voice_audio'; audio_b64: string; mime?: string };
+	| { type: 'request_snapshot' };
 
 /** Messages sent from the JARVIS backend to the SvelteKit frontend. */
 export type ServerMessage =
@@ -35,5 +33,4 @@ export interface SnapshotPayload {
 	permissions: Record<PermissionLevel, string>;
 	pending_permission: PermissionRequest | null;
 	trusted: boolean;
-	voice_enabled: boolean;
 }

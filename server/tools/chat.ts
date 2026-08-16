@@ -14,8 +14,6 @@ export class ChatTool extends Tool {
 
 	async execute(args: Record<string, unknown>, context: AgentContext): Promise<ToolResult> {
 		const message = requireString(args, 'message');
-		context.setStatus('speaking');
-		context.emit('SPEECH_STARTED', { message });
 		context.appendConversation('assistant', message);
 		return ok(message, { message });
 	}

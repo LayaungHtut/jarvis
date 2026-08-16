@@ -46,10 +46,10 @@
 	{@attach attachLog}
 	onscroll={() =>
 		(autoscroll = (el?.scrollTop ?? 0) + (el?.clientHeight ?? 0) >= (el?.scrollHeight ?? 0) - 8)}
-	class="h-full overflow-y-auto px-3 py-2 font-mono text-[11px] leading-relaxed"
+	class="h-full overflow-y-auto px-4 py-3 font-mono text-sm leading-relaxed"
 >
 	{#if logs.length === 0}
-		<p class="text-slate-600">Awaiting system events…</p>
+		<p class="mt-2 text-center text-xs text-slate-500">Awaiting system events…</p>
 	{:else}
 		{#each logs as entry (entry.id)}
 			<div class="flex gap-2">

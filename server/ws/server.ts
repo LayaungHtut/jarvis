@@ -10,7 +10,6 @@ import { Router } from '../llm/router';
 import { ModelChain } from '../llm/chain';
 import { PermissionGate, parsePolicy } from '../security/permissions';
 import { collectAdvanced } from '../tools/system';
-import { VoiceEngine } from '../voice/engine';
 import type { SystemInfo, ConversationMessage, LogEntry } from '../../src/lib/shared/types';
 
 interface ClientConnection {
@@ -31,9 +30,6 @@ export class JarvisServer {
 	private system: SystemInfo | null = null;
 	private conversation: ConversationMessage[] = [];
 	private readonly logs: LogEntry[] = [];
-	private readonly voice: VoiceEngine;
-	/** Whether JARVIS speaks its replies aloud (defaults to the TTS provider being enabled). */
-	private voiceEnabled = process.env.JARVIS_TTS_PROVIDER !== 'none';
 
 	constructor(server: Server) {
 		this.bus = new EventBus();
@@ -58,13 +54,6 @@ export class JarvisServer {
 		};
 
 		this.agent = new Agent(deps);
-		this.voice = new VoiceEngine({
-			onTranscription: (text) => {
-				if (text.trim()) void this.agent.handleCommand(text);
-			},
-			emit: (event, payload) => this.broadcastEvent(event, payload),
-			onSpeaking: () => undefined
-		});
 		this.wss = new WebSocketServer({ server, path: '/ws' });
 
 		setInterval(() => {
@@ -136,19 +125,6 @@ export class JarvisServer {
 		this.broadcastEvent(EVENT.CONVERSATION_UPDATED, {
 			conversation: this.conversation.slice(-100)
 		});
-		// Speak the final assistant reply out loud (mutable via `set_voice`).
-		if (role === 'assistant' && this.voiceEnabled) {
-			void this.voice.speak(content);
-		}
-	}
-
-	private setVoiceEnabled(enabled: boolean): void {
-		this.voiceEnabled = enabled;
-		this.broadcastEvent(EVENT.VOICE_STATE_CHANGED, { enabled });
-		this.log(
-			'info',
-			`Voice ${enabled ? 'enabled' : 'muted'} — JARVIS will ${enabled ? '' : 'not '}speak replies.`
-		);
 	}
 
 	private log(level: LogEntry['level'], message: string, tool?: string): void {
@@ -183,8 +159,7 @@ export class JarvisServer {
 			system: this.system,
 			permissions: parsePolicy(process.env.JARVIS_PERMISSIONS).autoApprove,
 			pending_permission: pending,
-			trusted: this.agent.isTrusted(),
-			voice_enabled: this.voiceEnabled
+			trusted: this.agent.isTrusted()
 		};
 	}
 
@@ -254,28 +229,9 @@ export class JarvisServer {
 				this.log('info', `Trusted session ${trusted ? 'enabled' : 'disabled'}`);
 				break;
 			}
-			case 'set_voice': {
-				this.setVoiceEnabled(msg.enabled === true);
-				break;
-			}
 			case 'request_snapshot':
 				this.send(client, { type: 'snapshot', payload: this.snapshot() });
 				break;
-			case 'voice_audio': {
-				const b64 = String(msg.audio_b64 ?? '');
-				if (!b64) return;
-				const audio = Buffer.from(b64, 'base64');
-				if (audio.length === 0 || audio.length > 15 * 1024 * 1024) {
-					this.log('warn', 'Voice audio ignored: invalid or too large.');
-					return;
-				}
-				const mime = typeof msg.mime === 'string' ? msg.mime : undefined;
-				void this.voice.transcribeAudio(
-					audio.buffer.slice(audio.byteOffset, audio.byteOffset + audio.byteLength),
-					mime
-				);
-				break;
-			}
 			default:
 				this.log('warn', `Unknown client message: ${String(msg.type)}`);
 		}

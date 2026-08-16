@@ -11,12 +11,11 @@ The whole project — frontend and agent — is one SvelteKit/TypeScript codebas
 The HUD renders:
 
 - **Conversation** — transcript of you and JARVIS.
-- **Core orb** — live agent status (IDLE / LISTENING / THINKING / EXECUTING / SPEAKING / ERROR…).
+- **Core orb** — live agent status (IDLE / PROCESSING / THINKING / EXECUTING / ERROR…).
 - **Task** — current task plan, running step, recent tool calls, errors.
 - **System** — CPU, memory, disk, uptime, active window telemetry.
 - **Event stream** — scrolling log of everything the agent does.
 - **Permission modal** — grants/denies high-risk actions (write, delete, terminal).
-- **MIC** — records your voice and sends it to the backend for transcription.
 
 ---
 
@@ -84,11 +83,6 @@ All settings live in `.env` (see `.env.example`).
 | `OPENROUTER_API_KEY_2..4` | —                                                | Optional extra accounts for the model chain |
 | `LOCAL_LLM_URL`           | `http://127.0.0.1:11434`                         | Local OpenAI-compatible endpoint            |
 | `LOCAL_LLM_MODEL`         | `qwen2.5:7b`                                     | Default local model                         |
-| `JARVIS_WAKE_WORD`        | `jarvis`                                         | Wake word (Stage 1 state machine)           |
-| `JARVIS_STT_PROVIDER`     | `none`                                           | `none` \| `whisper-cli` \| `openai`         |
-| `WHISPER_BIN`             | `whisper`                                        | Path to whisper CLI for `whisper-cli` STT   |
-| `OPENAI_API_KEY`          | —                                                | Required for `openai` STT                   |
-| `JARVIS_TTS_PROVIDER`     | `windows`                                        | `windows` (System.Speech) \| `none`         |
 
 ### Model chain (multi-account)
 
@@ -137,7 +131,6 @@ JARVIS_PERMISSIONS="low:true,medium:true,high:false,critical:false"
 └──────────────┘                               │   ├─ Router (LLM providers)   │
                                                │   ├─ Memory (node:sqlite)     │
                                                │   ├─ PermissionGate           │
-                                               │   └─ VoiceEngine (STT/TTS)    │
                                                └──────────────────────────────┘
 ```
 
@@ -178,7 +171,6 @@ Everything is JSON over a single WebSocket.
 { "type": "cancel_task", "task_id": "…" }
 { "type": "permission_response", "request_id": "…", "granted": true }
 { "type": "request_snapshot" }
-{ "type": "voice_audio", "audio_b64": "…", "mime": "audio/webm" }
 { "type": "ping" }
 ```
 
@@ -189,19 +181,7 @@ Everything is JSON over a single WebSocket.
 { "type": "event", "event": "TOOL_STARTED", "payload": { … } }
 ```
 
-Events include: `STATUS_CHANGED`, `TASK_UPDATED`, `CONVERSATION_UPDATED`, `PLAN_CREATED`, `TOOL_STARTED/COMPLETED/FAILED`, `PERMISSION_REQUESTED/RESOLVED`, `CHAIN_ACTIVITY`, `SPEECH_STARTED/FINISHED`, `VOICE_STATE_CHANGED`, `LOGGED`, `TRANSCRIPTION_READY`, `SYSTEM_INFO_UPDATED`, `TASK_COMPLETED/FAILED/CANCELLED`.
-
----
-
-## Voice (Stage 1)
-
-- **TTS** works out of the box on Windows (`System.Speech`). JARVIS speaks its
-  final reply to every command; mute/unmute from the HUD (**VOICE** toggle) or
-  the `set_voice` WS message, or set `JARVIS_TTS_PROVIDER=none` to disable by
-  default.
-- **STT** is optional: set `JARVIS_STT_PROVIDER=whisper-cli` (a `whisper` binary on PATH or `WHISPER_BIN`) or `openai` (+`OPENAI_API_KEY`).
-- Hold the **MIC** button in the HUD and speak; the recording is sent to the backend (`voice_audio`), transcribed, and injected as a command.
-- With STT disabled you still get the STATE MACHINE and a clear diagnostic in the event stream.
+Events include: `STATUS_CHANGED`, `TASK_UPDATED`, `CONVERSATION_UPDATED`, `PLAN_CREATED`, `TOOL_STARTED/COMPLETED/FAILED`, `PERMISSION_REQUESTED/RESOLVED`, `CHAIN_ACTIVITY`, `LOGGED`, `SYSTEM_INFO_UPDATED`, `TASK_COMPLETED/FAILED/CANCELLED`.
 
 ---
 
@@ -272,8 +252,6 @@ $env:PLAYWRIGHT_DOWNLOAD_HOST="https://registry.npmmirror.com/-/binary/playwrigh
 - [x] WebSocket agent server, tool registry, agent loop, permission gate
 - [x] Deterministic planner (+ optional LLM planning)
 - [x] HUD: status orb, conversation, task, system, event stream, permissions
-- [x] Mic capture + backend STT wiring
-- [ ] Wake-word detection (Vosk/OpenWakeWord)
 - [x] LLM-driven self-healing recovery pass
 - [ ] Rule DSL + named permission profiles
 - [ ] Standalone Tauri/Electron shell

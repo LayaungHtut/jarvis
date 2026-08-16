@@ -1,13 +1,4 @@
-export type AgentStatus =
-	| 'idle'
-	| 'listening'
-	| 'wake'
-	| 'processing'
-	| 'thinking'
-	| 'executing'
-	| 'observing'
-	| 'speaking'
-	| 'error';
+export type AgentStatus = 'idle' | 'processing' | 'thinking' | 'executing' | 'observing' | 'error';
 
 export type TaskStatus =
 	'pending' | 'planning' | 'executing' | 'observing' | 'completed' | 'failed' | 'cancelled';

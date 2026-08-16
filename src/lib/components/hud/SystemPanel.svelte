@@ -23,7 +23,7 @@
 
 <div class="h-full overflow-y-auto px-4 py-3 font-mono text-xs">
 	{#if !system}
-		<p class="mt-2 text-center text-[11px] text-slate-500">
+		<p class="mt-2 text-center text-xs text-slate-500">
 			{connected ? 'Awaiting telemetry…' : 'Offline.'}
 		</p>
 	{:else}

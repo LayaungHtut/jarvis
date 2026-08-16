@@ -175,7 +175,7 @@ export class Agent {
 		// Deterministic planner first; escalate to the LLM planner when it only
 		// yields the generic chat fallback (i.e. no tool was recognized). The
 		// chain's "planner" model is used when available.
-		let plan = this.planner.plan(this.task.command).steps;
+		let plan = (await this.planner.plan(this.task.command)).steps;
 		const isJustChat = plan.length === 1 && plan[0].tool === 'chat';
 		if (isJustChat && this.llmReady()) {
 			const llmPlan = this.chain

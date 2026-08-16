@@ -6,7 +6,6 @@
 	import TaskPanel from '$lib/components/hud/TaskPanel.svelte';
 	import SystemPanel from '$lib/components/hud/SystemPanel.svelte';
 	import LogPanel from '$lib/components/hud/LogPanel.svelte';
-	import VoiceControl from '$lib/components/hud/VoiceControl.svelte';
 	import CommandBar from '$lib/components/hud/CommandBar.svelte';
 
 	const conversation = $derived(jarvis.conversation);
@@ -98,13 +97,12 @@
 				</div>
 			</section>
 
-			<!-- Center: orb + voice + command -->
+			<!-- Center: orb + command -->
 			<section class="col-span-4 flex flex-col">
 				<div class="flex flex-1 items-center justify-center">
 					<StatusIndicator {status} />
 				</div>
 				<div>
-					<VoiceControl {connected} />
 					<CommandBar
 						{busy}
 						{connected}

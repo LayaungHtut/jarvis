@@ -99,14 +99,6 @@ export class JarvisClient {
 		this.send({ type: 'set_trust', trusted });
 	}
 
-	setVoice(enabled: boolean): void {
-		this.send({ type: 'set_voice', enabled });
-	}
-
-	voiceAudio(audioB64: string, mime?: string): void {
-		this.send({ type: 'voice_audio', audio_b64: audioB64, mime });
-	}
-
 	requestSnapshot(): void {
 		this.send({ type: 'request_snapshot' });
 	}
