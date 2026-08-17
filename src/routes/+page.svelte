@@ -88,9 +88,9 @@
 
 	<!-- Body -->
 	<main class="flex h-[calc(100vh-4.25rem)] flex-col">
-		<div class="grid min-h-0 flex-1 grid-cols-12">
+		<div class="grid min-h-0 flex-1 grid-cols-12 grid-rows-[minmax(0,1fr)]">
 			<!-- Left: conversation -->
-			<section class="col-span-4 flex flex-col border-r border-slate-800/80">
+			<section class="col-span-4 flex min-h-0 flex-col border-r border-slate-800/80">
 				<div class="panel-label">CONVERSATION</div>
 				<div class="min-h-0 flex-1">
 					<ConversationPanel messages={conversation} loading={busy && conversation.length === 0} />
@@ -98,8 +98,8 @@
 			</section>
 
 			<!-- Center: orb + command -->
-			<section class="col-span-4 flex flex-col">
-				<div class="flex flex-1 items-center justify-center">
+			<section class="col-span-4 flex min-h-0 flex-col">
+				<div class="flex min-h-0 flex-1 items-center justify-center">
 					<StatusIndicator {status} />
 				</div>
 				<div>
@@ -115,7 +115,7 @@
 			</section>
 
 			<!-- Right: task + system -->
-			<section class="col-span-4 flex flex-col border-l border-slate-800/80">
+			<section class="col-span-4 flex min-h-0 flex-col border-l border-slate-800/80">
 				<div class="flex min-h-0 flex-1 flex-col">
 					<div class="panel-label">TASK</div>
 					<div class="min-h-0 flex-1">

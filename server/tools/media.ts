@@ -1,7 +1,12 @@
-import { Tool, ok, fail } from './base';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { Tool, ok, fail, requireString } from './base';
 import type { ToolResult } from './base';
 import type { AgentContext } from '../agent/context';
 import { runPs } from './ps';
+import { BrowserController } from '../browser/controller';
+
+const exec = promisify(execFile);
 
 /** C# COM shim for the CoreAudio API (verified to compile under Add-Type). */
 const VOLUME_CS = `
@@ -189,6 +194,61 @@ export class MediaControlTool extends Tool {
 			return ok(out || `Sent ${action}.`);
 		} catch (err) {
 			return fail(`Failed to send ${action}.`, (err as Error).message);
+		}
+	}
+}
+
+/** Extract the first 11-char YouTube video id from a search results page. */
+export function extractVideoId(html: string): string | null {
+	const match = html.match(/"videoId":"([A-Za-z0-9_-]{11})"/);
+	return match ? match[1] : null;
+}
+
+/** Open a YouTube URL in the default browser and trigger the play/pause media key. */
+export function openAndPlayYouTube(url: string, query: string): Promise<string> {
+	const vk = 0xb3;
+	const script = `Add-Type @"\nusing System;\nusing System.Runtime.InteropServices;\npublic class Mk {\n[DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, UIntPtr e);\n}\n"@;\n[void][Mk]::keybd_event(${vk}, 0, 0, [UIntPtr]::Zero);\n[void][Mk]::keybd_event(${vk}, 0, 2, [UIntPtr]::Zero);\n"${query}"`;
+	return runPs(script);
+}
+
+/**
+ * Search YouTube for a song/artist, open the top result in the default
+ * browser, and press the play/pause media key. Composes the previously
+ * manual search → read → open → play chain into a single step.
+ */
+export class MediaPlayTool extends Tool {
+	name = 'media_play';
+	description =
+		'Search YouTube for a song or artist, open the top result in the default browser, and start playback.';
+	permissionLevel = 'medium' as const;
+	parameters = [
+		{ name: 'query', type: 'string', description: 'Song title, artist, or search phrase.' }
+	] as const;
+
+	async execute(args: Record<string, unknown>, context: AgentContext): Promise<ToolResult> {
+		if (process.platform !== 'win32') return fail('media_play requires Windows.');
+		const query = requireString(args, 'query', 500);
+		const searchUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+		context.emit('TOOL_STARTED', { tool: this.name, query });
+		const browser = new BrowserController();
+		try {
+			const html = await browser.readHtml(searchUrl, 15_000);
+			const id = extractVideoId(html);
+			if (!id) {
+				return fail('No playable video found on YouTube for that query.', 'no video id');
+			}
+			const watch = `https://www.youtube.com/watch?v=${id}`;
+			await exec('cmd', ['/c', 'start', '', watch], { windowsHide: true });
+			await openAndPlayYouTube(watch, query);
+			return ok(`Opened ${watch} and started playback.`, {
+				query,
+				url: watch,
+				video_id: id
+			});
+		} catch (err) {
+			return fail('Failed to play media.', (err as Error).message);
+		} finally {
+			await browser.close();
 		}
 	}
 }

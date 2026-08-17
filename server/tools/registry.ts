@@ -21,6 +21,7 @@ import {
 	SetVolumeTool,
 	AdjustVolumeTool,
 	MediaControlTool,
+	MediaPlayTool,
 	NotifyTool,
 	LockScreenTool
 } from './media';
@@ -93,6 +94,7 @@ export class ToolRegistry {
 			new SetVolumeTool(),
 			new AdjustVolumeTool(),
 			new MediaControlTool(),
+			new MediaPlayTool(),
 			new NotifyTool(),
 			new LockScreenTool(),
 			new ListProcessesTool(),

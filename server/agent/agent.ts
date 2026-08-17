@@ -25,6 +25,8 @@ const SYSTEM_PROMPT = `You are JARVIS, a local-first desktop AI assistant on Win
 You plan tasks as ordered tool calls. When no tool is needed, reply conversationally.
 Be concise and practical. Never invent tool arguments; only use the tools provided.`;
 
+const PERMISSION_ORDER: PermissionLevel[] = ['low', 'medium', 'high', 'critical'];
+
 export interface PermissionRequest {
 	request_id: string;
 	tool: string;
@@ -223,6 +225,9 @@ export class Agent {
 			await this.runChainLoop(context, taskId);
 		}
 
+		// 2.6 LEARN: record friendly-name aliases from successful app launches.
+		this.learnAppAliases();
+
 		// 3. COMPLETE
 		const summary = this.summarize();
 		completeTask(this.task, summary);
@@ -241,6 +246,41 @@ export class Agent {
 		const task = this.task;
 		const step = task?.plan[stepIndex];
 		if (!step || !this.retriedAdded(step)) return false;
+
+		// Deterministic alternative first: re-plan the command excluding every
+		// tool that has failed so far, and swap the failed step for a different
+		// tool. Free (no LLM round trip) and usually enough for simple cases.
+		const alt = await this.planner.planAlternatives(task!.command, this.failedTools(task!));
+		const altStep = alt.steps.find(
+			(s) => s.tool !== step.tool && !this.prefixTools(task!).has(s.tool)
+		);
+		if (altStep) {
+			const corrected = {
+				...step,
+				id: crypto.randomUUID(),
+				tool: altStep.tool,
+				args: altStep.args,
+				description: altStep.description,
+				status: 'pending' as const,
+				pending: true,
+				running: false,
+				result: undefined
+			};
+			updateStep(task!, stepIndex, corrected);
+			this.deps.bus.emitJarvis(EVENT.TASK_UPDATED, { task }, task!.task_id);
+			context.log(
+				'info',
+				`Recovery: swapped step ${stepIndex + 1} for ${altStep.tool} (deterministic alternative).`,
+				step.tool
+			);
+			const retry = await this.executor.runStep(task!, stepIndex, context);
+			if (retry.success) return true;
+			context.log(
+				'info',
+				`Deterministic alternative ${altStep.tool} also failed; escalating.`,
+				altStep.tool
+			);
+		}
 
 		if (this.llmReady()) {
 			const suggestion = await this.recovery.suggest({
@@ -305,6 +345,52 @@ export class Agent {
 			.filter((c) => c.status === 'completed')
 			.slice(-8)
 			.map((c) => ({ tool: c.tool, result: c.result }));
+	}
+
+	private failedTools(task: TaskState): string[] {
+		return [...new Set(task.tool_calls.filter((c) => c.status === 'failed').map((c) => c.tool))];
+	}
+
+	private prefixTools(task: TaskState): Set<string> {
+		return new Set(task.tool_calls.filter((c) => c.status === 'completed').map((c) => c.tool));
+	}
+
+	/** Escalate the effective permission level when command content is risky. */
+	private async effectiveLevel(req: {
+		permission_level: PermissionLevel;
+		tool: string;
+	}): Promise<PermissionLevel> {
+		let level = req.permission_level;
+		if (this.task && (req.tool === 'run_command' || req.tool === 'system_power')) {
+			try {
+				const risk = await this.planner.risk(this.task.command);
+				if (PERMISSION_ORDER.indexOf(risk) > PERMISSION_ORDER.indexOf(level)) level = risk;
+			} catch {
+				// keep the tool's static level
+			}
+		}
+		return level;
+	}
+
+	/** Learn friendly-name → app aliases from successful app launches. */
+	private learnAppAliases(): void {
+		if (!this.task) return;
+		for (const call of this.task.tool_calls) {
+			if (call.tool !== 'open_application' || call.status !== 'completed') continue;
+			const app = String(call.arguments?.application ?? '');
+			if (!app) continue;
+			const phrase = this.appPhraseFromCommand();
+			if (phrase) this.planner.learnAppAlias(phrase, app).catch(() => undefined);
+		}
+	}
+
+	private appPhraseFromCommand(): string | null {
+		const m = this.task?.command.match(/open\s+(.+)/i);
+		if (!m) return null;
+		const phrase = m[1].trim().toLowerCase();
+		if (phrase.split(/\s+/).length > 3) return null;
+		if (/\b(and|then|new|on|a|the)\b/.test(phrase)) return null;
+		return phrase;
 	}
 
 	/** Run the critic → optimizer loop up to {@link chainMaxRounds} times. */
@@ -457,8 +543,9 @@ export class Agent {
 			memory: this.deps.memory,
 			requestPermission: async (req) => {
 				if (this.trusted) return true;
-				if (this.deps.permissions.requiresConfirmation(req.permission_level)) {
-					return this.askPermission(req, taskId);
+				const level = await this.effectiveLevel(req);
+				if (this.deps.permissions.requiresConfirmation(level)) {
+					return this.askPermission({ ...req, permission_level: level }, taskId);
 				}
 				return true;
 			},

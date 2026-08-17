@@ -35,10 +35,7 @@ function query(session: pl.Session, goal: string): Promise<void> {
 	);
 }
 
-type AnswerResult =
-	| { kind: 'success'; answer: pl.Answer }
-	| { kind: 'fail' }
-	| { kind: 'limit' };
+type AnswerResult = { kind: 'success'; answer: pl.Answer } | { kind: 'fail' } | { kind: 'limit' };
 
 function answer(session: pl.Session): Promise<AnswerResult> {
 	return new Promise((resolve, reject) => {
@@ -84,8 +81,7 @@ function parseIntents(answer: pl.Answer | null): RawIntent[] {
 		if (!Array.isArray(step) || step.length !== 2) continue;
 		const priority = step[0] as number;
 		const intentTerm = (step[1] as { intent?: unknown } | undefined)?.intent as
-			| unknown[]
-			| undefined;
+			unknown[] | undefined;
 		if (!Array.isArray(intentTerm) || intentTerm.length !== 2) continue;
 		const tool = intentTerm[0] as string;
 		const argsList = (intentTerm[1] as unknown[]) ?? [];
@@ -137,6 +133,8 @@ function describe(tool: string, args: Record<string, unknown>): string {
 			return `Adjust volume by ${s(args.delta)}`;
 		case 'media_control':
 			return args.action === 'mute' ? 'Mute' : `${s(args.action)} media`;
+		case 'media_play':
+			return `Play: ${s(args.query)}`;
 		case 'copy_file':
 			return `Copy file ${s(args.source)} to ${s(args.destination)}`;
 		case 'clipboard_write':
@@ -242,12 +240,80 @@ export class Planner {
 		return null;
 	}
 
+	/**
+	 * Deterministic recovery alternatives: re-plan the command excluding tools
+	 * that have already failed, so the executor can swap a failed step for a
+	 * different tool without an LLM round trip.
+	 */
+	async planAlternatives(command: string, excluded: string[]): Promise<{ steps: PlanStep[] }> {
+		const run = () =>
+			this.ready.then(async () => {
+				const text = command.toLowerCase().trim();
+				const ex = excluded.map((e) => `'${escapeAtom(e)}'`).join(',');
+				const goal = `plan_excluding('${escapeAtom(text)}', [${ex}], S).`;
+				try {
+					await query(this.session, goal);
+					const ans = await this.answerLoop();
+					const intents = parseIntents(ans);
+					intents.sort((a, b) => a.priority - b.priority);
+					return intents.map((raw, i) => this.toStep(raw, i, command));
+				} catch {
+					return [];
+				}
+			});
+		this.queue = this.queue.then(run, run);
+		const steps = (await this.queue) as PlanStep[];
+		return { steps };
+	}
+
+	/** Classify a command's risk level via the Prolog risk/2 rules. */
+	async risk(command: string): Promise<'low' | 'medium' | 'high' | 'critical'> {
+		const run = () =>
+			this.ready.then(async () => {
+				const text = command.toLowerCase().trim();
+				const goal = `risk('${escapeAtom(text)}', R).`;
+				await query(this.session, goal);
+				const ans = await this.answerLoop();
+				const value = ans?.links?.R;
+				if (value == null) return 'low';
+				const id = (value as { id?: string }).id ?? String(value);
+				return (['low', 'medium', 'high', 'critical'] as const).includes(
+					id as 'low' | 'medium' | 'high' | 'critical'
+				)
+					? (id as 'low' | 'medium' | 'high' | 'critical')
+					: 'low';
+			});
+		this.queue = this.queue.then(run, run);
+		const result = (await this.queue) as 'low' | 'medium' | 'high' | 'critical';
+		return result;
+	}
+
+	/** Assert a friendly-name → app alias into the session (runtime learning). */
+	async learnAppAlias(alias: string, app: string): Promise<boolean> {
+		const run = () =>
+			this.ready.then(async () => {
+				const a = alias.toLowerCase().trim();
+				if (!a || !app) return false;
+				const goal = `assert_app_alias('${escapeAtom(a)}', '${escapeAtom(app)}').`;
+				try {
+					await query(this.session, goal);
+					await this.answerLoop();
+					return true;
+				} catch {
+					return false;
+				}
+			});
+		this.queue = this.queue.then(run, run);
+		const learned = (await this.queue) as boolean;
+		return learned;
+	}
+
 	private toStep(raw: RawIntent, index: number, command: string): PlanStep {
 		const args: Record<string, unknown> = { ...raw.args };
 		if (raw.tool === 'set_env_var' || raw.tool === 'get_env_var') {
 			args.name = String(args.name ?? '').toUpperCase();
 		}
-		if (raw.tool === 'chat') args.message = command;
+		if (raw.tool === 'chat' && !args.message) args.message = command;
 		return {
 			id: randomUUID(),
 			index,

@@ -157,9 +157,46 @@ app_keyword('notepad'). app_keyword('terminal'). app_keyword('cmd'). app_keyword
 app_keyword('spotify'). app_keyword('calculator'). app_keyword('paint'). app_keyword('word').
 app_keyword('excel').
 
+% Runtime-learnable friendly-name aliases (extensible via assert_app_alias/2).
+:- dynamic(app_alias/2).
+app_alias('vs', 'code'). app_alias('vscode', 'code'). app_alias('studio code', 'code').
+
+assert_app_alias(Alias, App) :-
+	\\+(Alias = ''),
+	\\+(App = ''),
+	( app_alias(Alias, App) -> true ; asserta(app_alias(Alias, App)) ).
+
+% Levenshtein-style distance bounded by N (edit budget). Succeeds when two
+% code lists are within N insertions/deletions/substitutions of each other.
+lev([], L, N) :- len(L, N).
+lev(L, [], N) :- len(L, N).
+lev([X|Xs], [Y|Ys], N) :-
+	( X = Y -> lev(Xs, Ys, N)
+	; N > 0,
+	  N1 is N - 1,
+	  ( lev([X|Xs], Ys, N1) ; lev(Xs, [Y|Ys], N1) ; lev(Xs, Ys, N1) ) ).
+
+% fuzzy_occurs(Word, Text): the keyword matches inside Text within one edit
+% of a contiguous window (typo tolerance for app names).
+fuzzy_occurs(Word, Text) :-
+	atom_codes(Text, TC),
+	atom_codes(Word, WC),
+	try_fuzzy(WC, TC).
+
+try_fuzzy(P, L) :-
+	( between(0, 1, N), lev(P, L, N) -> true
+	; L = [_|Tail], try_fuzzy(P, Tail) ).
+
+pick_app(Target, App) :- app_alias(Target, App), !.
 pick_app(Target, App) :-
 	findall(K, (app_keyword(K), contains(Target, K)), Kws),
-	( Kws = [] -> App = Target ; longest_kw(Kws, App) ).
+	Kws = [_|_],
+	longest_kw(Kws, App), !.
+pick_app(Target, App) :-
+	findall(K, (app_keyword(K), fuzzy_occurs(K, Target)), Fws),
+	Fws = [_|_],
+	longest_kw(Fws, App), !.
+pick_app(Target, Target).
 longest_kw([K], K).
 longest_kw([K|Ks], Best) :-
 	longest_kw(Ks, B),
@@ -380,6 +417,54 @@ action_for('next', 'next'). action_for('skip', 'next').
 action_for('previous', 'previous'). action_for('prev', 'previous').
 action_for('play', 'play_pause'). action_for('pause', 'play_pause').
 action_for('resume', 'play_pause').
+media_action('next', 'next'). media_action('skip', 'next').
+media_action('previous', 'previous'). media_action('prev', 'previous').
+media_action('pause', 'play_pause'). media_action('resume', 'play_pause').
+
+% True when a media control word (next/skip/previous/prev/pause/resume) occurs
+% in the command — i.e. a transport action rather than a specific track query.
+media_control_word(Command, Action) :-
+	media_action(Ctl, Action),
+	word_occ(Command, Ctl, _).
+
+media_filler('music'). media_filler('song'). media_filler('track'). media_filler('video'). media_filler('media').
+
+% Strip leading generic media words so "play music from me eain shin" yields
+% "me eain shin". Fully consuming a filler-only tail yields '' (generic play).
+% The trailing cut commits to the first result: otherwise the Out = S0
+% fallback re-fires after backtracking and leaks the unstripped text.
+strip_media_fillers(In, Out) :-
+	skip_spaces(In, S0),
+	( ( media_filler(F),
+	    atom_concat(F, R1, S0),
+	    ( R1 = '' -> Out = '' ; skip_spaces1(R1, S1), \\+(S1 = ''), strip_media_fillers(S1, Out) ) )
+	; Out = S0 ), !.
+
+strip_prep(In, Out) :-
+	member(P, ['from ', 'by ', 'the ', 'to ', 'a ', 'some ']),
+	atom_concat(P, R1, In),
+	skip_spaces(R1, R2),
+	Out = R2, !.
+strip_prep(In, In).
+
+normalize_media(In, Out) :-
+	strip_prep(In, A),
+	strip_media_fillers(A, B),
+	strip_prep(B, C),
+	strip_media_fillers(C, Out).
+
+% media_query(Text, Query): capture the specific song/artist after a play verb,
+% ignoring filler/preposition words. Fails for generic commands like "play music".
+media_query(Text, Q) :-
+	member(V, ['play', 'listen']),
+	word_occ(Text, V, B),
+	atom_length(V, VL),
+	End is B + VL,
+	sub_atom(Text, End, _, 0, R0),
+	skip_spaces1(R0, R1),
+	\\+(R1 = ''),
+	normalize_media(R1, Q),
+	\\+(Q = '').
 
 % ------------------------------------------------------------------
 % copy / clipboard
@@ -621,6 +706,112 @@ env_get(Text, Name) :-
 	id_token(R4, Name, _Tail).
 
 % ------------------------------------------------------------------
+% clarification — verb present but nothing to act on
+% ------------------------------------------------------------------
+verb_only(Command, Verb) :-
+	word_occ2(Command, Verb, B),
+	atom_length(Verb, VL),
+	End is B + VL,
+	sub_atom(Command, End, _, 0, R0),
+	skip_spaces(R0, R1),
+	R1 = ''.
+
+clarify(Command, 'Which app, file, or URL would you like me to open?') :- verb_only(Command, 'open'), !.
+clarify(Command, 'What would you like me to search for?') :- verb_only(Command, 'search'), !.
+clarify(Command, 'What should I close?') :- verb_only(Command, 'close'), !.
+clarify(Command, 'Which process should I kill?') :- verb_only(Command, 'kill'), !.
+clarify(Command, 'Which file should I read?') :- verb_only(Command, 'read'), !.
+clarify(Command, 'What should I run?') :- verb_only(Command, 'run'), !.
+clarify(Command, 'What would you like me to play?') :- verb_only(Command, 'play'), !.
+
+% ------------------------------------------------------------------
+% chained commands — "X then Y" / "X and <verb> Y" become ordered steps
+% ------------------------------------------------------------------
+action_verb('open'). action_verb('launch'). action_verb('start').
+action_verb('write'). action_verb('create'). action_verb('make'). action_verb('save').
+action_verb('run'). action_verb('execute'). action_verb('close'). action_verb('kill').
+action_verb('play'). action_verb('search'). action_verb('copy'). action_verb('focus').
+action_verb('read'). action_verb('set'). action_verb('restart'). action_verb('stop').
+
+and_split(Text, Before, After) :-
+	find_seam(Text, ' and ', Before, After),
+	B2 is Before + 5,
+	sub_atom(Text, B2, After, 0, Tail0),
+	skip_spaces(Tail0, Tail1),
+	action_verb(V),
+	starts_with(Tail1, V).
+
+then_split(Text, Before, After) :-
+	find_seam(Text, ' then ', Before, After).
+
+first_sep(Text, B, 6, A) :- then_split(Text, B, A), !.
+first_sep(Text, B, 5, A) :- and_split(Text, B, A).
+
+split_segments(Text, Segs) :-
+	( first_sep(Text, B, SeamLen, After) ->
+	    prefix(Text, B, Head0),
+	    trim_trailing(Head0, Head),
+	    B2 is B + SeamLen,
+	    sub_atom(Text, B2, After, 0, Tail),
+	    split_segments(Tail, Rest),
+	    Segs = [Head|Rest]
+	; Segs = [Text] ).
+
+% ------------------------------------------------------------------
+% risk classification — lets the permission gate escalate on content
+% ------------------------------------------------------------------
+risk(Command, 'critical') :-
+	( contains(Command, 'shutdown') ; contains(Command, 'reboot')
+	; contains(Command, 'restart')
+	; (contains(Command, 'shut'), contains(Command, 'down'))
+	; contains(Command, 'format') ; contains(Command, 'delete') ), !.
+risk(Command, 'high') :-
+	( contains(Command, 'taskkill') ; contains(Command, 'kill')
+	; contains(Command, 'rm ') ; contains(Command, 'rd /s')
+	; contains(Command, 'hibernate')
+	; contains(Command, 'logoff') ; contains(Command, 'log off') ), !.
+risk(Command, 'low').
+
+% ------------------------------------------------------------------
+% plan / plan_excluding — ordered steps, chain-aware, with clarifications
+% ------------------------------------------------------------------
+chat_fallback(Seg, step(900, intent(chat, [message(Q)]))) :- clarify(Seg, Q), !.
+chat_fallback(Seg, step(999, intent(chat, [message(Seg)]))).
+
+plan_segment(Seg, Steps) :-
+	findall(step(P, intent(T, A)), intent(Seg, P, T, A), Raw),
+	( Raw = [] -> chat_fallback(Seg, Step), Steps = [Step] ; Steps = Raw ).
+
+shift_priorities([], _N, []).
+shift_priorities([step(P, intent(T, A))|Rest], N, [step(P1, intent(T, A))|More]) :-
+	P1 is P + N,
+	shift_priorities(Rest, N, More).
+
+plan_segments([], _N, []).
+plan_segments([Seg|Rest], N, Steps) :-
+	plan_segment(Seg, SegSteps),
+	shift_priorities(SegSteps, N, Shifted),
+	N1 is N + 1000,
+	plan_segments(Rest, N1, More),
+	append(Shifted, More, Steps).
+
+plan(Command, Steps) :-
+	split_segments(Command, Segs),
+	plan_segments(Segs, 0, Steps).
+
+plan_excluding(Command, Excluded, Steps) :-
+	split_segments(Command, Segs),
+	plan_excluding_segments(Segs, 0, Excluded, Steps).
+
+plan_excluding_segments([], _N, _Excluded, []).
+plan_excluding_segments([Seg|Rest], N, Excluded, Steps) :-
+	findall(step(P, intent(T, A)), (intent(Seg, P, T, A), \\+ member(T, Excluded)), Raw),
+	shift_priorities(Raw, N, Shifted),
+	N1 is N + 1000,
+	plan_excluding_segments(Rest, N1, Excluded, More),
+	append(Shifted, More, Steps).
+
+% ------------------------------------------------------------------
 % intent rules — priority = cross-rule ordering; cut = first match
 % ------------------------------------------------------------------
 intent(Command, 10, open_application, [application(App)]) :-
@@ -692,10 +883,25 @@ intent(Command, 120, adjust_volume, [delta(Delta)]) :-
 intent(Command, 120, media_control, [action('mute')]) :-
 	word_occ2(Command, 'mute', _), !.
 
+intent(Command, 125, media_play, [query(Q)]) :-
+	media_verb(V),
+	word_occ2(Command, V, _),
+	\\+(media_control_word(Command, _)),
+	media_query(Command, Q), !.
+
+% Control verbs (next/skip/previous/prev/pause/resume) always map to a media
+% control action, even when a target word follows ("play next track").
+intent(Command, 130, media_control, [action(Action)]) :-
+	media_control_word(Command, Action), !.
+
+% play/pause/resume with a generic media target but no specific song/artist
+% ("play music", "pause the music") toggles playback.
 intent(Command, 130, media_control, [action(Action)]) :-
 	media_verb(V),
 	word_occ2(Command, V, _),
+	\\+(media_control_word(Command, _)),
 	media_target(Command),
+	\\+(media_query(Command, _)),
 	action_for(V, Action), !.
 
 intent(Command, 140, copy_file, [source(Src), destination(Dst)]) :-
@@ -787,8 +993,4 @@ intent(Command, 270, set_env_var, [name(Name), value(Value)]) :-
 
 intent(Command, 270, get_env_var, [name(Name)]) :-
 	env_get(Command, Name), !.
-
-plan(Command, Steps) :-
-	findall(step(P, intent(T, A)), intent(Command, P, T, A), Raw),
-	( Raw = [] -> Steps = [step(999, intent(chat, [message(Command)]))] ; Steps = Raw ).
 `;

@@ -21,14 +21,15 @@ export default defineConfig({
 		})
 	],
 	server: {
+		host: '127.0.0.1',
 		fs: { allow: ['.', 'workspace'] },
 		proxy: {
 			'/api': {
-				target: 'http://localhost:8765',
+				target: 'http://127.0.0.1:8765',
 				changeOrigin: true
 			},
 			'/ws': {
-				target: 'ws://localhost:8765',
+				target: 'ws://127.0.0.1:8765',
 				ws: true
 			}
 		}

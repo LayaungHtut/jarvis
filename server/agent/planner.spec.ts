@@ -56,7 +56,9 @@ describe('Planner', async () => {
 	});
 
 	it('splits compound verbose open+write and extracts the app', async () => {
-		const plan = await planner.plan('open new folder vs code on new window and write a portfolio .html');
+		const plan = await planner.plan(
+			'open new folder vs code on new window and write a portfolio .html'
+		);
 		const tools = plan.steps.map((s) => s.tool);
 		expect(tools).toEqual(['open_application', 'write_file']);
 		expect(plan.steps[0].args.application).toBe('code');
@@ -189,5 +191,103 @@ describe('Planner', async () => {
 	it('routes set_env_var', async () => {
 		const plan = await planner.plan('set MY_VAR to hello');
 		expect(plan.steps.some((s) => s.tool === 'set_env_var' && s.args.name === 'MY_VAR')).toBe(true);
+	});
+});
+
+describe('Planner new behaviors', async () => {
+	const planner = new Planner();
+
+	it('captures a specific query for media_play', async () => {
+		const plan = await planner.plan('play music from me eain shin');
+		expect(plan.steps).toHaveLength(1);
+		expect(plan.steps[0].tool).toBe('media_play');
+		expect(plan.steps[0].args.query).toBe('me eain shin');
+	});
+
+	it('captures a song+artist for media_play', async () => {
+		const plan = await planner.plan('play bohemian rhapsody by queen');
+		expect(plan.steps[0].tool).toBe('media_play');
+		expect(plan.steps[0].args.query).toBe('bohemian rhapsody by queen');
+	});
+
+	it('routes generic play music to media_control play_pause', async () => {
+		const plan = await planner.plan('play music');
+		expect(plan.steps[0].tool).toBe('media_control');
+		expect(plan.steps[0].args.action).toBe('play_pause');
+	});
+
+	it('routes control verbs to media_control actions', async () => {
+		const next = await planner.plan('play next track');
+		expect(next.steps[0].tool).toBe('media_control');
+		expect(next.steps[0].args.action).toBe('next');
+		const pause = await planner.plan('pause');
+		expect(pause.steps[0].tool).toBe('media_control');
+		expect(pause.steps[0].args.action).toBe('play_pause');
+	});
+
+	it('splits "then" chains into ordered steps', async () => {
+		const plan = await planner.plan('open notepad then close calculator');
+		expect(plan.steps.map((s) => s.tool)).toEqual(['open_application', 'close_window']);
+		expect(plan.steps[0].args.application).toBe('notepad');
+		expect(plan.steps[1].args.target).toContain('calculator');
+	});
+
+	it('splits "and" chains into ordered steps', async () => {
+		const plan = await planner.plan('open chrome and read package.json');
+		expect(plan.steps.map((s) => s.tool)).toEqual(['open_application', 'read_file']);
+		expect(plan.steps[0].args.application).toBe('chrome');
+		expect(plan.steps[1].args.path).toBe('package.json');
+	});
+
+	it('planAlternatives keeps the surviving segment of a chain', async () => {
+		const alt = await planner.planAlternatives('open chrome and read package.json', [
+			'open_application'
+		]);
+		expect(alt.steps.map((s) => s.tool)).toEqual(['read_file']);
+	});
+
+	it('planAlternatives returns empty when every tool is excluded', async () => {
+		const alt = await planner.planAlternatives('play bohemian rhapsody by queen', ['media_play']);
+		expect(alt.steps).toHaveLength(0);
+	});
+
+	it('asks a clarifying question instead of guessing on verb-only input', async () => {
+		const open = await planner.plan('open');
+		expect(open.steps[0].tool).toBe('chat');
+		expect(open.steps[0].args.message).toBe('Which app, file, or URL would you like me to open?');
+		const search = await planner.plan('search');
+		expect(search.steps[0].args.message).toBe('What would you like me to search for?');
+	});
+
+	it('still falls back to plain chat for conversational input', async () => {
+		const plan = await planner.plan('hello there');
+		expect(plan.steps[0].tool).toBe('chat');
+		expect(plan.steps[0].args.message).toBe('hello there');
+	});
+
+	it('learns friendly-name aliases at runtime via asserta', async () => {
+		const learner = new Planner();
+		expect(await learner.learnAppAlias('my editor', 'code')).toBe(true);
+		const plan = await learner.plan('open my editor');
+		expect(plan.steps[0].tool).toBe('open_application');
+		expect(plan.steps[0].args.application).toBe('code');
+	});
+
+	it('tolerates one-edit typos in app names', async () => {
+		const plan = await planner.plan('open chrme');
+		expect(plan.steps[0].tool).toBe('open_application');
+		expect(plan.steps[0].args.application).toBe('chrome');
+		const notepad = await planner.plan('open notpad');
+		expect(notepad.steps[0].args.application).toBe('notepad');
+	});
+
+	it('classifies risk from command content', async () => {
+		expect(await planner.risk('shut down the computer')).toBe('critical');
+		expect(await planner.risk('restart my pc')).toBe('critical');
+		expect(await planner.risk('format the disk')).toBe('critical');
+		expect(await planner.risk('taskkill notepad')).toBe('high');
+		expect(await planner.risk('log off')).toBe('high');
+		expect(await planner.risk('sleep')).toBe('low');
+		expect(await planner.risk('play music')).toBe('low');
 	});
 });
