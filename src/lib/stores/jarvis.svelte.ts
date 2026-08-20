@@ -5,11 +5,13 @@ import type {
 	LogEntry,
 	SystemInfo,
 	PermissionRequest,
-	PermissionLevel
+	PermissionLevel,
+	WrittenFile
 } from '$lib/shared/types';
 import type { SnapshotPayload } from '$lib/shared/protocol';
 import { EVENT } from '$lib/shared/events';
 import { JarvisClient, resolveWsUrl } from '$lib/api/ws-client';
+import { speak, stopSpeaking } from '$lib/api/voice';
 
 class JarvisStore {
 	connection = $state<'connecting' | 'connected' | 'disconnected'>('connecting');
@@ -17,15 +19,18 @@ class JarvisStore {
 	task: TaskState | null = $state(null);
 	conversation: ConversationMessage[] = $state([]);
 	logs: LogEntry[] = $state([]);
+	writtenFiles: WrittenFile[] = $state([]);
 	system: SystemInfo | null = $state(null);
 	pendingPermission: PermissionRequest | null = $state(null);
 	permissions: Record<PermissionLevel, string> | null = $state(null);
 	trusted = $state(false);
+	voiceEnabled = $state(true);
 	busy = $derived(
 		this.status === 'thinking' || this.status === 'executing' || this.status === 'processing'
 	);
 	private client: JarvisClient | null = null;
 	private input = '';
+	private lastSpokenId: string | null = null;
 
 	connect(): void {
 		if (this.client) return;
@@ -73,6 +78,11 @@ class JarvisStore {
 		this.client?.setTrust(trusted);
 	}
 
+	toggleVoice(): void {
+		this.voiceEnabled = !this.voiceEnabled;
+		if (!this.voiceEnabled) stopSpeaking();
+	}
+
 	private pushLocalLog(level: LogEntry['level'], message: string): void {
 		this.pushLog({ id: crypto.randomUUID(), level, message, timestamp: new Date().toISOString() });
 	}
@@ -86,6 +96,7 @@ class JarvisStore {
 		this.permissions = payload.permissions;
 		this.pendingPermission = payload.pending_permission;
 		this.trusted = payload.trusted;
+		this.syncSpokenCursor(payload.conversation);
 	}
 
 	private applyEvent(event: string, payload: unknown): void {
@@ -96,12 +107,20 @@ class JarvisStore {
 			case EVENT.TASK_UPDATED:
 				this.task = (payload as { task: TaskState }).task;
 				break;
-			case EVENT.CONVERSATION_UPDATED:
-				this.conversation = (payload as { conversation: ConversationMessage[] }).conversation;
+			case EVENT.CONVERSATION_UPDATED: {
+				const conversation = (payload as { conversation: ConversationMessage[] }).conversation;
+				this.conversation = conversation;
+				this.speakNewAssistantMessages(conversation);
 				break;
+			}
 			case EVENT.LOGGED:
 				this.pushLog(payload as LogEntry);
 				break;
+			case EVENT.FILE_WRITTEN: {
+				const file = payload as WrittenFile;
+				this.writtenFiles = [...this.writtenFiles, file].slice(-25);
+				break;
+			}
 			case EVENT.SYSTEM_INFO_UPDATED:
 				this.system = payload as SystemInfo;
 				break;
@@ -134,6 +153,28 @@ class JarvisStore {
 
 	private pushLog(entry: LogEntry): void {
 		this.logs = [...this.logs, entry].slice(-300);
+	}
+
+	private syncSpokenCursor(conversation: ConversationMessage[]): void {
+		for (let i = conversation.length - 1; i >= 0; i--) {
+			if (conversation[i].role === 'assistant') {
+				this.lastSpokenId = conversation[i].id;
+				break;
+			}
+		}
+	}
+
+	private speakNewAssistantMessages(conversation: ConversationMessage[]): void {
+		if (!this.voiceEnabled) return;
+		const startIndex = this.lastSpokenId
+			? conversation.findIndex((m) => m.id === this.lastSpokenId)
+			: -1;
+		for (let i = startIndex + 1; i < conversation.length; i++) {
+			const message = conversation[i];
+			if (message.role !== 'assistant') continue;
+			this.lastSpokenId = message.id;
+			speak(message.content);
+		}
 	}
 }
 

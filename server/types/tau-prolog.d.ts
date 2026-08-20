@@ -10,18 +10,13 @@ declare module 'tau-prolog' {
 			text: string,
 			callbacks?: { success?: () => void; error?: (err: unknown) => void }
 		): void;
-		query(
-			goal: string,
-			callbacks?: { success?: () => void; error?: (err: unknown) => void }
-		): void;
-		answer(
-			callbacks?: {
-				success?: (answer: Answer) => void;
-				fail?: () => void;
-				limit?: () => void;
-				error?: (err: unknown) => void;
-			}
-		): void;
+		query(goal: string, callbacks?: { success?: () => void; error?: (err: unknown) => void }): void;
+		answer(callbacks?: {
+			success?: (answer: Answer) => void;
+			fail?: () => void;
+			limit?: () => void;
+			error?: (err: unknown) => void;
+		}): void;
 	}
 
 	export function create(limit?: number): Session;
@@ -30,6 +25,5 @@ declare module 'tau-prolog' {
 }
 
 declare module 'tau-prolog/modules/lists.js' {
-	import * as pl from 'tau-prolog';
 	export default function register(pl: typeof import('tau-prolog')): void;
 }

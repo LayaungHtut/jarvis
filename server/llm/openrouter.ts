@@ -7,6 +7,7 @@ import type {
 	ToolDefinition,
 	ToolCall
 } from './enhanced';
+import { sleep } from '../util';
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 
@@ -21,6 +22,26 @@ async function post(path: string, body: unknown, apiKey: string): Promise<Respon
 		},
 		body: JSON.stringify(body)
 	});
+}
+
+/** POST with bounded retry/backoff for rate limits (429) and transient 5xx errors. */
+async function postWithRetry(
+	path: string,
+	body: unknown,
+	apiKey: string,
+	retries = 2
+): Promise<Response> {
+	let last: Response | null = null;
+	for (let attempt = 0; attempt <= retries; attempt++) {
+		const res = await post(path, body, apiKey);
+		last = res;
+		if (res.status !== 429 && res.status < 500) return res;
+		if (attempt === retries) return res;
+		const retryAfter = Number(res.headers.get('retry-after') ?? 0);
+		const delay = Math.min((retryAfter || 2 ** attempt) * 1000, 10_000);
+		await sleep(delay);
+	}
+	return last as Response;
 }
 
 export class OpenRouterProvider implements EnhancedLLMProvider {
@@ -46,7 +67,7 @@ export class OpenRouterProvider implements EnhancedLLMProvider {
 		maxTokens: number
 	): Promise<unknown> {
 		if (!this.available) throw new LLMError('OPENROUTER_API_KEY is not configured', this.name);
-		const res = await post(
+		const res = await postWithRetry(
 			'/chat/completions',
 			{
 				model: this.model,

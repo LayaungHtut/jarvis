@@ -51,6 +51,7 @@ export class Executor {
 			const success = result?.success !== false;
 			call.status = success ? 'completed' : 'failed';
 			call.result = result?.message ?? '';
+			call.data = result?.data;
 			updateStep(task, index, {
 				status: success ? 'completed' : 'failed',
 				running: false,

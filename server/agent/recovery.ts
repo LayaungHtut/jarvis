@@ -16,7 +16,7 @@ export interface RecoveryInput {
 	/** The failure message returned by the tool. */
 	error: string;
 	/** Prior successful tool calls in this task (tool + truncated result). */
-	priorCalls: { tool: string; result?: string }[];
+	priorCalls: { tool: string; result?: string; data?: unknown }[];
 	/** Schema of the tools the agent may use. */
 	tools: ToolDefinition[];
 }
@@ -65,9 +65,25 @@ export class RecoveryPlanner {
 	}
 }
 
+function summarizePrior(call: { tool: string; result?: string; data?: unknown }): string {
+	let line = `- ${call.tool}: ${call.result ?? '(no result)'}`;
+	const data = call.data as { elements?: Array<Record<string, unknown>> } | undefined;
+	if (data?.elements && Array.isArray(data.elements) && data.elements.length) {
+		const items = data.elements
+			.slice(0, 15)
+			.map(
+				(e) =>
+					`${String(e.name ?? '')} (${String(e.type ?? '')}${Number.isFinite(Number(e.x)) ? ` @ ${e.x},${e.y}` : ''})`
+			)
+			.join(', ');
+		line += ` | elements: ${items}${data.elements.length > 15 ? ', …' : ''}`;
+	}
+	return line;
+}
+
 export function buildRecoveryPrompt(input: RecoveryInput): LLMChatMessage[] {
 	const prior = input.priorCalls.length
-		? input.priorCalls.map((c) => `- ${c.tool}: ${c.result ?? '(no result)'}`).join('\n')
+		? input.priorCalls.map(summarizePrior).join('\n')
 		: '(none)';
 	const user =
 		`Command: "${input.command}"\n` +

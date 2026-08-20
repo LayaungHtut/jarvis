@@ -43,6 +43,38 @@ async function findWindows(target: string): Promise<{
 	return { matches: decode(out, target) };
 }
 
+/** Poll until a window with a real handle appears, or give up. A just-launched
+ * app (open_application) often hasn't created its main window yet when the
+ * next step runs, so a single lookup races it and fails. Polling happens
+ * inside one PowerShell process to avoid per-attempt startup overhead. */
+async function waitForWindow(
+	target: string,
+	waitMs = 6000,
+	pollMs = 400
+): Promise<
+	Array<{ ProcessName: string; Id: number; MainWindowTitle: string; MainWindowHandle: string }>
+> {
+	const needle = target.toLowerCase().replace(/'/g, "''");
+	const script = `$needle = '${needle}'
+$deadline = (Get-Date).AddMilliseconds(${waitMs})
+$win = $null
+while (-not $win) {
+  $win = Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    ($_.MainWindowTitle -ne '' -or $_.MainWindowHandle -ne 0) -and
+    ($_.ProcessName.ToLower().Contains($needle) -or $_.MainWindowTitle.ToLower().Contains($needle))
+  } | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+  if ($win -or (Get-Date) -ge $deadline) { break }
+  Start-Sleep -Milliseconds ${pollMs}
+}
+if ($win) { $win | Select-Object ProcessName, Id, MainWindowTitle, MainWindowHandle | ConvertTo-Json -Compress }`;
+	try {
+		const out = await runPs(script, waitMs + 15_000);
+		return decode(out, target);
+	} catch {
+		return [];
+	}
+}
+
 /** List running processes (optionally filtered). */
 export class ListProcessesTool extends Tool {
 	name = 'list_processes';
@@ -137,8 +169,7 @@ export class FocusWindowTool extends Tool {
 		});
 		if (!granted) return fail('Focus was denied by the user.');
 		try {
-			const { matches } = await findWindows(target);
-			const candidates = matches.filter((m) => Number(m.MainWindowHandle) !== 0);
+			const candidates = await waitForWindow(target);
 			if (candidates.length === 0)
 				return fail(`No window matched "${target}".`, 'window not found');
 			const win = candidates[0];

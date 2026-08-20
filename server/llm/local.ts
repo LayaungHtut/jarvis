@@ -121,6 +121,16 @@ export class LocalProvider implements EnhancedLLMProvider {
 		];
 		if (openMatch) {
 			const query = openMatch[1].toLowerCase();
+			if (/\b(google|gmail)\s*(account|acc)|@/.test(query)) {
+				const account = query
+					.replace(/\b(google|gmail)\s*(account|acc)s?\b/g, '')
+					.replace(/\b(the|my|named)\b/g, '')
+					.trim();
+				return JSON.stringify({
+					name: 'open_google_account',
+					arguments: { account: account || query }
+				});
+			}
 			const found = appNames.find((names) => names.some((n) => query.includes(n)));
 			if (found) {
 				return JSON.stringify({ name: 'open_application', arguments: { application: found[0] } });

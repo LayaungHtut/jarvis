@@ -1,6 +1,7 @@
 import { Tool } from './base';
 import type { ToolInfo, PermissionLevel } from '../../src/lib/shared/types';
 import { OpenApplicationTool, ListWindowsTool, GetActiveWindowTool } from './windows';
+import { OpenGoogleAccountTool } from './google';
 import { SystemInfoTool } from './system';
 import { TerminalTool } from './terminal';
 import { ReadFileTool, WriteFileTool, ListDirTool, DeleteFileTool } from './filesystem';
@@ -67,6 +68,7 @@ export class ToolRegistry {
 	private registerAll(): void {
 		const tools: Tool[] = [
 			new OpenApplicationTool(),
+			new OpenGoogleAccountTool(),
 			new ListWindowsTool(),
 			new GetActiveWindowTool(),
 			new SystemInfoTool(),
@@ -167,7 +169,9 @@ export class ToolRegistry {
 				),
 				required: t.parameters
 					.filter(
-						(p) => p.type === 'string' && ['application', 'path', 'command', 'url'].includes(p.name)
+						(p) =>
+							p.type === 'string' &&
+							['application', 'account', 'path', 'command', 'url'].includes(p.name)
 					)
 					.map((p) => p.name)
 			}

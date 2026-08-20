@@ -167,14 +167,17 @@ assert_app_alias(Alias, App) :-
 	( app_alias(Alias, App) -> true ; asserta(app_alias(Alias, App)) ).
 
 % Levenshtein-style distance bounded by N (edit budget). Succeeds when two
-% code lists are within N insertions/deletions/substitutions of each other.
+% code lists are within N insertions/deletions/substitutions/transpositions
+% of each other. The extra branch swaps adjacent characters so typos like
+% "chorme"→chrome or "termianl"→terminal cost a single edit.
 lev([], L, N) :- len(L, N).
 lev(L, [], N) :- len(L, N).
 lev([X|Xs], [Y|Ys], N) :-
 	( X = Y -> lev(Xs, Ys, N)
 	; N > 0,
 	  N1 is N - 1,
-	  ( lev([X|Xs], Ys, N1) ; lev(Xs, [Y|Ys], N1) ; lev(Xs, Ys, N1) ) ).
+	  ( lev([X|Xs], Ys, N1) ; lev(Xs, [Y|Ys], N1) ; lev(Xs, Ys, N1)
+	  ; ( Xs = [X2|Xs2], Ys = [Y2|Ys2], X = Y2, X2 = Y, lev(Xs2, Ys2, N1) ) ) ).
 
 % fuzzy_occurs(Word, Text): the keyword matches inside Text within one edit
 % of a contiguous window (typo tolerance for app names).
@@ -203,6 +206,75 @@ longest_kw([K|Ks], Best) :-
 	atom_length(K, LK),
 	atom_length(B, LB),
 	( LK > LB -> Best = K ; Best = B ).
+
+% ------------------------------------------------------------------
+% google / gmail account intents — "open shirogami ryuu google account"
+% ------------------------------------------------------------------
+google_account_marker(M) :-
+	member(M, ['google accounts', 'google account', 'google acc',
+	           'gmail accounts', 'gmail account', 'gmail acc',
+	           'google mail account', 'g account', 'g accounts']).
+
+google_account_present(Text) :-
+	google_account_marker(M),
+	word_occ2(Text, M, _).
+
+% Position of a marker that is bounded on both sides (avoids matching
+% 'google acc' inside 'google account').
+ga_before(Command, M, Pre) :-
+	word_occ2(Command, M, Before),
+	Before > 0,
+	prefix(Command, Before, Pre0),
+	trim_trailing(Pre0, Pre).
+
+ga_after(Command, M, Post) :-
+	word_occ2(Command, M, Before),
+	atom_length(M, ML),
+	After is Before + ML,
+	sub_atom(Command, After, _, 0, R0),
+	skip_spaces(R0, R1),
+	opt_word('named', R1, R2),
+	skip_spaces(R2, R3),
+	\\+(R3 = ''),
+	Post = R3.
+
+% Strip lead-in verbs/particles so "switch to shirogami ryuu" -> "shirogami ryuu".
+strip_open_lead(In, Out) :-
+	member(P, ['switch to ', 'switch ', 'change to ', 'change ', 'swap to ',
+	           'go to ', 'log into ', 'log in to ', 'sign into ', 'sign in to ',
+	           'open ', 'launch ', 'start ', 'the ', 'my ']),
+	atom_concat(P, R1, In),
+	skip_spaces(R1, R2),
+	\\+(R2 = ''),
+	strip_open_lead(R2, Out), !.
+strip_open_lead(In, Out) :- trim_trailing(In, Out).
+
+ga_candidate(Command, Name) :-
+	google_account_marker(M),
+	( ga_before(Command, M, Pre), strip_open_lead(Pre, Name)
+	; ga_after(Command, M, Post), strip_open_lead(Post, Name) ).
+
+longest_ga([N], N).
+longest_ga([A|Rest], Best) :-
+	longest_ga(Rest, B),
+	atom_length(A, LA),
+	atom_length(B, LB),
+	( LA >= LB -> Best = A ; Best = B ).
+
+ga_name(Command, Name) :-
+	findall(N, ga_candidate(Command, N), Names),
+	longest_ga(Names, Name),
+	\\+(Name = '').
+
+% A bare email address after an open verb means a Google account.
+ga_email(Command, Name) :-
+	split_open(Command, Target),
+	contains(Target, '@'),
+	strip_open_lead(Target, Name),
+	\\+(Name = '').
+
+google_account_name(Command, Name) :-
+	( ga_name(Command, Name) ; ga_email(Command, Name) ), !.
 
 % ------------------------------------------------------------------
 % "open X" / compound "open X and write Y"
@@ -243,6 +315,9 @@ open_compound(Command) :-
 	compound_split(Target, _, _, _).
 
 generic_open(Command, Tool, Args) :-
+	\\+(list_windows_pattern(Command)),
+	\\+ google_account_present(Command),
+	\\+ open_path_lead(Command),
 	split_open(Command, Target),
 	\\+(compound_split(Target, _, _, _)),
 	open_kind(Target, Command, Tool, Args).
@@ -331,7 +406,14 @@ system_kw('system'). system_kw('cpu'). system_kw('memory'). system_kw('ram').
 system_kw('disk'). system_kw('hardware'). system_kw('battery').
 how_doing(Text) :- contains(Text, 'how'), ( contains(Text, 'doing') ; contains(Text, 'runn') ).
 
+computer_name_q(Text) :-
+	( contains(Text, 'computer name') ; contains(Text, 'hostname')
+	; contains(Text, 'machine name') ; contains(Text, 'device name')
+	; ( contains(Text, 'computer'), contains(Text, 'name') )
+	; ( contains(Text, 'host'), contains(Text, 'name') ) ).
+
 list_windows_pattern(Text) :-
+	\\+ contains(Text, 'processes'),
 	( (contains(Text, 'what'), (contains(Text, 'open') ; contains(Text, 'running') ; contains(Text, 'window')))
 	; (contains(Text, 'list'), contains(Text, 'windows')) ).
 
@@ -478,11 +560,15 @@ copy_file_split(Text, Src, Dst) :-
 	opt_word('file', R1, R2),
 	skip_spaces(R2, R3),
 	path_run(R3, Src, Tail),
+	( looks_like_path(Src) ; looks_like_path(R3) ),
 	skip_spaces1(Tail, T0),
 	atom_concat('to', T1, T0),
 	skip_spaces1(T1, T2),
 	path_run(T2, Dst, _).
 
+looks_like_path(Text) :-
+	( contains(Text, '.') ; contains(Text, '/') ; contains(Text, '\\\\')
+	; contains(Text, ':') ; contains(Text, '_') ).
 copy_capture(Text, Out) :-
 	member(V, ['copy', 'clipboard']),
 	word_occ(Text, V, Before),
@@ -493,12 +579,33 @@ copy_capture(Text, Out) :-
 	\\+(R1 = ''),
 	Out = R1.
 
+strip_clipboard_suffix(In, Out) :-
+	find_seam(In, ' to the clipboard', Before, _),
+	prefix(In, Before, Mid),
+	trim_trailing(Mid, Out), !.
+strip_clipboard_suffix(In, Out) :-
+	find_seam(In, ' to clipboard', Before, _),
+	prefix(In, Before, Mid),
+	trim_trailing(Mid, Out), !.
+strip_clipboard_suffix(In, In).
+
+clipboard_write_text(Text, Out) :-
+	copy_capture(Text, Raw),
+	strip_clipboard_suffix(Raw, Out),
+	atom_length(Out, Len),
+	Len > 0.
+
+clipboard_write_ok(Command, Out) :-
+	clipboard_write_text(Command, Out),
+	( looks_like_path(Out) -> fail ; true ).
+
 clipboard_readish(Text) :-
 	( word_occ(Text, 'clipboard', Before),
 	  atom_length('clipboard', VL), End is Before + VL,
 	  sub_atom(Text, End, _, 0, R0), skip_spaces(R0, R1),
 	  ( atom_concat('read', _, R1) ; atom_concat('show', _, R1) ) )
-	; ( contains(Text, 'what'), contains(Text, 'clipboard') ).
+	; ( contains(Text, 'what'), contains(Text, 'clipboard') )
+	; ( ( contains(Text, 'read') ; contains(Text, 'show') ), contains(Text, 'clipboard') ).
 
 % ------------------------------------------------------------------
 % focus / mouse / typing / lock / screen
@@ -629,12 +736,14 @@ sf_capture(Text, Pattern) :-
 	skip_spaces(R2, R3),
 	opt_word('the', R3, R4),
 	skip_spaces(R4, R5),
-	member(F, ['file', 'folder', 'document']),
+	member(F, ['file', 'folder', 'document', 'files', 'folders', 'documents']),
 	word_prefix(R5, F),
 	atom_concat(F, R6, R5),
 	skip_spaces1(R6, R7),
-	\\+(R7 = ''),
-	Pattern = R7.
+	opt_word('for', R7, R8),
+	skip_spaces(R8, R9),
+	\\+(R9 = ''),
+	Pattern = R9.
 
 power_kw(Text) :-
 	( contains(Text, 'shutdown') ; contains(Text, 'restart') ; contains(Text, 'reboot')
@@ -732,6 +841,10 @@ action_verb('write'). action_verb('create'). action_verb('make'). action_verb('s
 action_verb('run'). action_verb('execute'). action_verb('close'). action_verb('kill').
 action_verb('play'). action_verb('search'). action_verb('copy'). action_verb('focus').
 action_verb('read'). action_verb('set'). action_verb('restart'). action_verb('stop').
+action_verb('move'). action_verb('rename'). action_verb('delete'). action_verb('remove').
+action_verb('zip'). action_verb('compress'). action_verb('minimize'). action_verb('scroll').
+action_verb('press'). action_verb('type'). action_verb('fill'). action_verb('notify').
+action_verb('remember'). action_verb('erase').
 
 and_split(Text, Before, After) :-
 	find_seam(Text, ' and ', Before, After),
@@ -756,6 +869,348 @@ split_segments(Text, Segs) :-
 	    split_segments(Tail, Rest),
 	    Segs = [Head|Rest]
 	; Segs = [Text] ).
+
+% ------------------------------------------------------------------
+% extended capabilities — folder open / dir listing / process list /
+% volume read / active window / memory / page reading / press / scroll
+% ------------------------------------------------------------------
+folder_word('folder'). folder_word('directory'). folder_word('dir').
+
+is_url(Target) :- starts_with(Target, 'http').
+is_url(Target) :- starts_with(Target, 'www.').
+
+strip_explorer(In, Out) :-
+	find_seam(In, ' in explorer', B, _),
+	prefix(In, B, Mid),
+	trim_trailing(Mid, Out), !.
+strip_explorer(In, In).
+
+open_path_lead(Command) :-
+	open_verb(V),
+	word_occ(Command, V, Before),
+	atom_length(V, VL),
+	End is Before + VL,
+	sub_atom(Command, End, _, 0, R0),
+	skip_spaces1(R0, R1),
+	opt_word('the', R1, R2),
+	folder_word(F),
+	word_prefix(R2, F).
+
+open_path_capture(Command, Path) :-
+	open_verb(V),
+	word_occ(Command, V, Before),
+	atom_length(V, VL),
+	End is Before + VL,
+	sub_atom(Command, End, _, 0, R0),
+	skip_spaces1(R0, R1),
+	opt_word('the', R1, R2),
+	folder_word(F),
+	word_occ(R2, F, B2),
+	atom_length(F, FL),
+	E2 is B2 + FL,
+	sub_atom(R2, E2, _, 0, R3),
+	skip_spaces1(R3, R4),
+	opt_word('named', R4, R5),
+	skip_spaces(R5, R6),
+	strip_explorer(R6, R7),
+	skip_spaces(R7, R8),
+	( R8 = '' -> Path = '.' ; Path = R8 ).
+
+after_word(Text, Word, Out) :-
+	word_occ(Text, Word, Before),
+	atom_length(Word, WL),
+	End is Before + WL,
+	sub_atom(Text, End, _, 0, R0),
+	skip_spaces1(R0, Out).
+
+skip_fillers(In, Out) :-
+	skip_spaces(In, S0),
+	skip_fillers2(S0, Out).
+skip_fillers2(In, Out) :-
+	skip_filler(In, R) -> skip_fillers2(R, Out) ; Out = In.
+skip_filler(In, Out) :-
+	member(F, ['me ', 'the ', 'are ', 'is ', 'which ', 'that ', 'all ']),
+	atom_concat(F, R1, In),
+	skip_spaces(R1, Out).
+
+dir_list_pattern(Command) :-
+	( (contains(Command, 'files') ; contains(Command, 'contents') ; contains(Command, 'directory') ; contains(Command, 'folder')),
+	  ( (contains(Command, 'list') ; contains(Command, 'show') ; contains(Command, 'what') ; contains(Command, 'find') ; contains(Command, 'search') ; contains(Command, 'in the')) ) ),
+	\\+ contains(Command, 'web'),
+	\\+ open_path_lead(Command).
+
+dir_list_capture(Command, Path) :-
+	( member(V, ['list', 'show']), after_word(Command, V, R1)
+	; word_occ(Command, 'files', _), after_word(Command, 'files', R1) ),
+	skip_fillers(R1, R2),
+	opt_word('files', R2, R3),
+	opt_word('contents', R3, R4),
+	skip_spaces(R4, R5),
+	( (atom_concat('in', R6, R5), skip_spaces1(R6, R7))
+	; (atom_concat('of', R6, R5), skip_spaces1(R6, R7))
+	; (atom_concat('inside', R6, R5), skip_spaces1(R6, R7))
+	; R7 = R5 ),
+	opt_word('the', R7, R8),
+	skip_spaces(R8, R9),
+	opt_word('folder', R9, R10),
+	opt_word('directory', R10, R11),
+	skip_spaces(R11, R12),
+	strip_dir_suffix(R12, R13),
+	( R13 = '' -> Path = '.' ; Path = R13 ).
+dir_list_capture(Command, Path) :-
+	find_seam(Command, ' in the ', B, A),
+	prefix(Command, B, _),
+	B2 is B + 8,
+	sub_atom(Command, B2, A, 0, R0),
+	skip_spaces1(R0, R1),
+	folder_word(F),
+	( (atom_concat(F, ' ', P), starts_with(R1, P), atom_concat(P, R2, R1), skip_spaces1(R2, R3)) ; R3 = R1 ),
+	strip_dir_suffix(R3, R4),
+	( R4 = '' -> Path = '.' ; Path = R4 ).
+
+strip_dir_suffix(In, Out) :-
+	find_seam(In, ' folder', Before, _),
+	prefix(In, Before, Mid),
+	trim_trailing(Mid, Out), !.
+strip_dir_suffix(In, Out) :-
+	find_seam(In, ' directory', Before, _),
+	prefix(In, Before, Mid),
+	trim_trailing(Mid, Out), !.
+strip_dir_suffix(In, In).
+
+process_filter(Command, Filter) :-
+	word_occ(Command, 'processes', Before),
+	atom_length('processes', VL),
+	End is Before + VL,
+	sub_atom(Command, End, _, 0, R0),
+	skip_spaces1(R0, R1),
+	member(M, ['named', 'matching', 'like', 'such as']),
+	atom_concat(M, R2, R1),
+	skip_spaces1(R2, R3),
+	\\+(R3 = ''),
+	Filter = R3.
+
+list_processes_pattern(Command) :-
+	contains(Command, 'processes'),
+	( contains(Command, 'list') ; contains(Command, 'show') ; contains(Command, 'what') ; contains(Command, 'running') ).
+
+volume_level_q(Command) :-
+	contains(Command, 'volume'),
+	member(M, ['what', 'how', 'check', 'show', 'tell', 'level', 'percent', 'current']),
+	contains(Command, M),
+	\\+ volume_set(Command, _),
+	\\+ volume_delta(Command, _, _).
+
+active_window_q(Command) :-
+	( contains(Command, 'active window') ; contains(Command, 'focused window')
+	; contains(Command, 'current window') ; contains(Command, 'which window is on top')
+	; contains(Command, 'which app') ; contains(Command, 'what app am')
+	; contains(Command, 'which program') ; contains(Command, 'in focus') ),
+	\\+ contains(Command, 'list').
+
+remember_verb('remember'). remember_verb('note'). remember_verb('store').
+remember_capture(Command, Content) :-
+	remember_verb(V),
+	word_occ(Command, V, Before),
+	atom_length(V, VL),
+	End is Before + VL,
+	sub_atom(Command, End, _, 0, R0),
+	skip_spaces1(R0, R1),
+	opt_word('that', R1, R2),
+	skip_spaces(R2, R3),
+	\\+(R3 = ''),
+	Content = R3.
+
+recall_word('remember'). recall_word('know'). recall_word('recall').
+recall_query(Command, Query) :-
+	( contains(Command, 'do you') ; contains(Command, 'what do') ; contains(Command, 'what did') ),
+	recall_word(V),
+	word_occ(Command, V, Before),
+	atom_length(V, VL),
+	End is Before + VL,
+	sub_atom(Command, End, _, 0, R0),
+	skip_spaces1(R0, R1),
+	opt_word('about', R1, R2),
+	skip_spaces(R2, R3),
+	\\+(R3 = ''),
+	Query = R3.
+
+read_page_url(Command, Url) :-
+	find_first(Command, 'http', Before),
+	sub_atom(Command, Before, _, 0, Url).
+read_page_intent(Command) :-
+	( contains(Command, 'read') ; contains(Command, 'summarize')
+	; contains(Command, 'what does') ; contains(Command, 'what is on') ),
+	read_page_url(Command, _).
+
+minimize_verb('minimize'). minimize_verb('minimise'). minimize_verb('min').
+
+notify_capture(Command, Title, Message) :-
+	member(V, ['notify', 'remind']),
+	word_occ(Command, V, Before),
+	atom_length(V, VL),
+	End is Before + VL,
+	sub_atom(Command, End, _, 0, R0),
+	skip_spaces1(R0, R1),
+	opt_word('me', R1, R2),
+	( atom_concat('that', R3, R2), skip_spaces1(R3, R4) ; R4 = R2 ),
+	( (find_seam(R4, ' saying ', B, A), prefix(R4, B, Msg0), trim_trailing(Msg0, Msg), B2 is B + 8, sub_atom(R4, B2, A, 0, T0), skip_spaces1(T0, Title))
+	; (Msg = R4, Title = 'JARVIS') ),
+	\\+(Msg = ''),
+	Message = Msg.
+
+move_verb('move'). move_verb('rename').
+move_file_split(Text, Src, Dst) :-
+	move_verb(V),
+	word_occ(Text, V, Before),
+	atom_length(V, VL),
+	End is Before + VL,
+	sub_atom(Text, End, _, 0, R0),
+	skip_spaces1(R0, R1),
+	opt_word('file', R1, R2),
+	skip_spaces(R2, R3),
+	path_run(R3, Src, Tail),
+	looks_like_path(Src),
+	skip_spaces1(Tail, T0),
+	member(Sep, ['to', 'as', 'into']),
+	atom_concat(Sep, T1, T0),
+	skip_spaces1(T1, T2),
+	path_run(T2, Dst, _),
+	\\+(Dst = '').
+
+zip_verb('zip'). zip_verb('compress'). zip_verb('archive').
+zip_capture(Command, Source, Archive) :-
+	zip_verb(V),
+	word_occ(Command, V, Before),
+	atom_length(V, VL),
+	End is Before + VL,
+	sub_atom(Command, End, _, 0, R0),
+	skip_spaces1(R0, R1),
+	opt_word('the', R1, R2),
+	opt_word('folder', R2, R3),
+	opt_word('directory', R3, R4),
+	opt_word('named', R4, R5),
+	skip_spaces(R5, R6),
+	zip_split(R6, Source, Archive).
+
+zip_split(Text, Source, Archive) :-
+	find_seam(Text, 'into', B, A),
+	prefix(Text, B, Src0),
+	trim_trailing(Src0, Source),
+	B2 is B + 4,
+	sub_atom(Text, B2, A, 0, Arc0),
+	skip_spaces(Arc0, Archive),
+	\\+(Archive = '').
+zip_split(Text, Source, Archive) :-
+	find_seam(Text, 'as', B, A),
+	prefix(Text, B, Src0),
+	trim_trailing(Src0, Source),
+	B2 is B + 2,
+	sub_atom(Text, B2, A, 0, Arc0),
+	skip_spaces(Arc0, Archive),
+	\\+(Archive = '').
+zip_split(Text, Source, Archive) :-
+	Source = Text,
+	atom_concat(Text, '.zip', Archive).
+
+delete_verb('delete'). delete_verb('remove'). delete_verb('erase').
+delete_capture(Command, Path) :-
+	delete_verb(V),
+	word_occ(Command, V, Before),
+	atom_length(V, VL),
+	End is Before + VL,
+	sub_atom(Command, End, _, 0, R0),
+	skip_spaces1(R0, R1),
+	opt_word('the', R1, R2),
+	opt_word('file', R2, R3),
+	skip_spaces(R3, R4),
+	\\+(R4 = ''),
+	Path = R4.
+
+press_verb('press'). press_verb('hit').
+press_key_capture(Command, Combo) :-
+	press_verb(V),
+	word_occ(Command, V, Before),
+	atom_length(V, VL),
+	End is Before + VL,
+	sub_atom(Command, End, _, 0, R0),
+	skip_spaces1(R0, R1),
+	opt_word('the', R1, R2),
+	skip_spaces(R2, R3),
+	\\+(R3 = ''),
+	strip_key_suffix(R3, Combo).
+strip_key_suffix(In, Out) :-
+	suffix(In, 4, ' key'),
+	atom_length(In, Ln),
+	Lnm is Ln - 4,
+	prefix(In, Lnm, Mid),
+	trim_trailing(Mid, Out), !.
+strip_key_suffix(In, In).
+
+scroll_capture(Command, Direction, Notches) :-
+	word_occ(Command, 'scroll', Before),
+	atom_length('scroll', VL),
+	End is Before + VL,
+	sub_atom(Command, End, _, 0, R0),
+	skip_spaces1(R0, R1),
+	member(Direction, [up, down]),
+	atom_concat(Direction, R2, R1),
+	skip_spaces(R2, R3),
+	optional_digits(R3, Digits),
+	( Digits = '' -> Notches = 1 ; to_num(Digits, Notches) ), !.
+
+field_suffix('field'). field_suffix('box'). field_suffix('input').
+strip_field_suffix(In, Out) :-
+	field_suffix(F),
+	atom_concat(' ', F, P),
+	find_seam(In, P, Before, _),
+	prefix(In, Before, Mid0),
+	trim_trailing(Mid0, Mid),
+	\\+(Mid = ''),
+	strip_field_suffix(Mid, Out), !.
+strip_field_suffix(In, In).
+
+split_on(Text, Sep, Before, After, SeamLen) :-
+	find_seam(Text, Sep, Before, After),
+	Before > 0,
+	After > 0,
+	atom_length(Sep, SeamLen).
+
+ui_set_into(Command, Text, Name) :-
+	member(V, ['type', 'enter', 'put']),
+	word_occ(Command, V, Before),
+	atom_length(V, VL),
+	End is Before + VL,
+	sub_atom(Command, End, _, 0, R0),
+	skip_spaces1(R0, R1),
+	member(Sep, ['into', 'in the']),
+	split_on(R1, Sep, B, A, SL),
+	prefix(R1, B, Text0),
+	trim_trailing(Text0, Text),
+	B2 is B + SL,
+	sub_atom(R1, B2, A, 0, Field0),
+	skip_spaces(Field0, Field1),
+	opt_word('the', Field1, Field2),
+	strip_field_suffix(Field2, Name),
+	\\+(Text = ''), \\+(Name = '').
+
+ui_set_fill(Command, Name, Text) :-
+	member(V, ['fill', 'set']),
+	word_occ(Command, V, Before),
+	atom_length(V, VL),
+	End is Before + VL,
+	sub_atom(Command, End, _, 0, R0),
+	skip_spaces1(R0, R1),
+	opt_word('the', R1, R2),
+	member(Sep, ['with', 'to']),
+	split_on(R2, Sep, B, A, SL),
+	prefix(R2, B, Name0),
+	trim_trailing(Name0, Name1),
+	strip_field_suffix(Name1, Name),
+	B2 is B + SL,
+	sub_atom(R2, B2, A, 0, Text0),
+	skip_spaces(Text0, Text),
+	\\+(Name = ''), \\+(Text = '').
 
 % ------------------------------------------------------------------
 % risk classification — lets the permission gate escalate on content
@@ -814,7 +1269,13 @@ plan_excluding_segments([Seg|Rest], N, Excluded, Steps) :-
 % ------------------------------------------------------------------
 % intent rules — priority = cross-rule ordering; cut = first match
 % ------------------------------------------------------------------
+intent(Command, 5, open_google_account, [account(Name)]) :-
+	\\+(list_windows_pattern(Command)),
+	google_account_name(Command, Name), !.
+
 intent(Command, 10, open_application, [application(App)]) :-
+	\\+(list_windows_pattern(Command)),
+	\\+ google_account_present(Command),
 	split_open(Command, Target),
 	compound_split(Target, AppPhrase, _Verb, _Rest),
 	pick_app(AppPhrase, App).
@@ -827,11 +1288,20 @@ intent(Command, 20, Tool, Args) :-
 
 intent(Command, 30, search_web, [query(Query)]) :-
 	\\+(has_open_launch(Command)),
+	\\+(contains(Command, 'file')),
+	\\+(contains(Command, 'folder')),
+	\\+(contains(Command, 'document')),
+	\\+ ui_set_into(Command, _, _),
+	\\+ ui_set_fill(Command, _, _),
 	search_query(Command, Query), !.
 
 intent(Command, 40, system_info, []) :-
 	\\+(has_open_launch(Command)),
 	( system_kw(W), contains(Command, W) ; how_doing(Command) ), !.
+
+intent(Command, 45, system_info, []) :-
+	\\+(has_open_launch(Command)),
+	computer_name_q(Command), !.
 
 intent(Command, 50, list_windows, []) :-
 	list_windows_pattern(Command), !.
@@ -844,8 +1314,9 @@ intent(Command, 70, run_command, [command('npm run check && npm test -- --run'),
 
 intent(Command, 80, read_file, [path(Path)]) :-
 	\\+(contains(Command, 'open')),
-	read_path(Command, Path), !.
-
+	\\+(contains(Command, 'clipboard')),
+	read_path(Command, Path),
+	\\+ is_url(Path), !.
 intent(Command, 90, write_file, [path(Path), content(Content)]) :-
 	\\+(open_compound(Command)),
 	generic_write(Command, Clause),
@@ -909,9 +1380,7 @@ intent(Command, 140, copy_file, [source(Src), destination(Dst)]) :-
 	copy_file_split(Command, Src, Dst), !.
 
 intent(Command, 140, clipboard_write, [text(Text)]) :-
-	\\+(copy_file_split(Command, _, _)),
-	\\+(clipboard_readish(Command)),
-	copy_capture(Command, Text), !.
+	clipboard_write_ok(Command, Text), !.
 
 intent(Command, 140, clipboard_read, []) :-
 	clipboard_readish(Command), !.
@@ -934,7 +1403,10 @@ intent(Command, 170, mouse_click, [button('left'), x(X), y(Y), clicks(1)]) :-
 	click_coords(Command, X, Y), !.
 
 intent(Command, 180, type_text, [text(Text)]) :-
-	\\+(contains(Command, 'file')),
+	\\+ word_occ2(Command, 'file', _),
+	\\+ contains(Command, 'into'),
+	\\+ ui_set_into(Command, _, _),
+	\\+ ui_set_fill(Command, _, _),
 	type_capture(Command, Text), !.
 
 intent(Command, 190, lock_screen, []) :-
@@ -988,9 +1460,76 @@ intent(Command, 260, system_services, [action(Action), name(Name)]) :-
 	svc_name(R3, Name),
 	Action = V, !.
 
+% ------------------------------------------------------------------
+% extended-capability intents — placed before the env-var rules so the
+% cuts in the broad env_get/1 clauses cannot prune them (tau-prolog's
+% findall backtracks clause-by-clause, and a cut commits to the first
+% matching clause in file order).
+% ------------------------------------------------------------------
+intent(Command, 9, open_path, [path(Path)]) :-
+	open_path_lead(Command),
+	open_path_capture(Command, Path),
+	\\+ compound_split(Command, _, _, _), !.
+
+intent(Command, 46, get_volume, []) :- volume_level_q(Command), !.
+
+intent(Command, 47, get_active_window, []) :- active_window_q(Command), !.
+
+intent(Command, 51, list_processes, [filter(Filter)]) :-
+	list_processes_pattern(Command),
+	process_filter(Command, Filter), !.
+intent(Command, 51, list_processes, []) :- list_processes_pattern(Command), !.
+
+intent(Command, 52, list_dir, [path(Path)]) :-
+	dir_list_pattern(Command),
+	dir_list_capture(Command, Path), !.
+
+intent(Command, 62, remember, [content(Content)]) :-
+	remember_capture(Command, Content),
+	\\+ recall_query(Command, _), !.
+
+intent(Command, 63, recall, [query(Query)]) :-
+	recall_query(Command, Query), !.
+
+intent(Command, 81, read_page, [url(Url)]) :-
+	read_page_intent(Command),
+	read_page_url(Command, Url),
+	\\+ contains(Command, 'open'), !.
+
+intent(Command, 112, minimize_window, [target(Target)]) :-
+	minimize_verb(V),
+	anchored_verb(V, Command, Target), !.
+
+intent(Command, 122, show_notification, [title(Title), message(Message)]) :-
+	notify_capture(Command, Title, Message), !.
+
+intent(Command, 141, move_file, [source(Src), destination(Dst)]) :-
+	\\+ contains(Command, 'clipboard'),
+	move_file_split(Command, Src, Dst), !.
+
+intent(Command, 142, zip_folder, [source(Src), archive(Arc)]) :-
+	zip_capture(Command, Src, Arc), !.
+
+intent(Command, 145, delete_file, [path(Path)]) :-
+	delete_capture(Command, Path),
+	( word_occ2(Command, 'file', _) ; word_occ2(Command, 'folder', _) ; looks_like_path(Path) ), !.
+
+intent(Command, 155, press_key, [combo(Combo)]) :-
+	press_key_capture(Command, Combo),
+	\\+ word_occ2(Command, 'file', _), !.
+
+intent(Command, 175, scroll_wheel, [direction(Direction), clicks(Notches)]) :-
+	scroll_capture(Command, Direction, Notches), !.
+
+intent(Command, 225, ui_set_text, [name(Name), text(Text)]) :-
+	( ui_set_into(Command, Text, Name) ; ui_set_fill(Command, Name, Text) ),
+	\\+ env_set(Command, _, _),
+	\\+ word_occ2(Command, 'file', _), !.
+
 intent(Command, 270, set_env_var, [name(Name), value(Value)]) :-
 	env_set(Command, Name, Value), !.
 
 intent(Command, 270, get_env_var, [name(Name)]) :-
+	\\+(computer_name_q(Command)),
 	env_get(Command, Name), !.
 `;

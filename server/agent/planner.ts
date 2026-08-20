@@ -105,6 +105,8 @@ function describe(tool: string, args: Record<string, unknown>): string {
 	switch (tool) {
 		case 'open_application':
 			return `Open ${s(args.application)}`;
+		case 'open_google_account':
+			return `Open Google account: ${s(args.account)}`;
 		case 'open_url':
 			return `Open ${s(args.url)}`;
 		case 'search_web':
@@ -173,6 +175,40 @@ function describe(tool: string, args: Record<string, unknown>): string {
 			return `Type: ${s(args.text)}`;
 		case 'chat':
 			return 'Conversational reply';
+		case 'get_volume':
+			return 'Read current volume level';
+		case 'get_active_window':
+			return 'Get the active window';
+		case 'list_processes':
+			return s(args.filter)
+				? `List processes matching ${s(args.filter)}`
+				: 'List running processes';
+		case 'list_dir':
+			return `List files in ${s(args.path)}`;
+		case 'delete_file':
+			return `Delete file ${s(args.path)}`;
+		case 'move_file':
+			return `Move ${s(args.source)} to ${s(args.destination)}`;
+		case 'zip_folder':
+			return `Zip ${s(args.source)} into ${s(args.archive)}`;
+		case 'open_path':
+			return `Open folder ${s(args.path)}`;
+		case 'remember':
+			return `Remember: ${s(args.content)}`;
+		case 'recall':
+			return s(args.query) ? `Recall memories about ${s(args.query)}` : 'Recall stored memories';
+		case 'press_key':
+			return `Press ${s(args.combo)}`;
+		case 'scroll_wheel':
+			return `Scroll ${s(args.direction)}`;
+		case 'ui_set_text':
+			return `Fill "${s(args.name)}" with text`;
+		case 'show_notification':
+			return `Notify: ${s(args.message)}`;
+		case 'minimize_window':
+			return `Minimize ${s(args.target)}`;
+		case 'read_page':
+			return `Read page: ${s(args.url)}`;
 		default:
 			return tool;
 	}

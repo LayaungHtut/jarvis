@@ -3,13 +3,14 @@ import { promisify } from 'node:util';
 import { Tool, ok, fail, requireString } from './base';
 import type { ToolResult } from './base';
 import type { AgentContext } from '../agent/context';
+import { runPs } from './ps';
 
 const exec = promisify(execFile);
 
 const APP_DETECT: Record<string, (() => Promise<string[]>) | string[]> = {
-	vscode: () => Promise.resolve(['code']),
-	code: () => Promise.resolve(['code']),
-	'visual studio code': () => Promise.resolve(['code']),
+	vscode: ['start', 'code'],
+	code: ['start', 'code'],
+	'visual studio code': ['start', 'code'],
 	chrome: ['start', 'chrome'],
 	'google chrome': ['start', 'chrome'],
 	telegram: ['start', ''], // resolved below
@@ -32,7 +33,13 @@ function isDetector(v: unknown): v is () => Promise<string[]> {
 	return typeof v === 'function';
 }
 
+/** Canonical names of desktop apps the open_application tool knows how to launch. */
+export const KNOWN_APP_NAMES: readonly string[] = Object.keys(APP_DETECT);
+
 const LAUNCH_ALIASES: Record<string, string[]> = {
+	vscode: ['Code.exe'],
+	code: ['Code.exe'],
+	'visual studio code': ['Code.exe'],
 	chrome: ['chrome'], // explorer start:
 	'google chrome': ['chrome'],
 	telegram: ['Telegram.exe'],
@@ -44,6 +51,78 @@ const LAUNCH_ALIASES: Record<string, string[]> = {
 async function runCmd(cmd: string, args: string[]): Promise<string> {
 	const { stdout, stderr } = await exec(cmd, args, { timeout: 15_000, windowsHide: true });
 	return (stdout + stderr).trim();
+}
+
+/** Safe bare executable name (e.g. Telegram.exe, chrome) for use inside a PowerShell script. */
+function validExeName(name: string): boolean {
+	return /^[A-Za-z0-9][A-Za-z0-9.\-_ ]{0,63}$/.test(name);
+}
+
+/** Resolve the absolute path of an executable by name (App Paths registry,
+ * Start Menu/Desktop shortcuts, or known install folders). Returns null when
+ * no match is found. */
+async function resolveExecutable(exeName: string): Promise<string | null> {
+	if (!validExeName(exeName)) return null;
+	const base = exeName.toLowerCase().endsWith('.exe') ? exeName : `${exeName}.exe`;
+	const bare = base.slice(0, -4);
+	const script = `$name = '${base}'
+$bare = '${bare}'
+$result = $null
+$reg = @(
+  'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\' + $name,
+  'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths\\' + $name,
+  'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\' + $name
+)
+foreach ($p in $reg) {
+  $v = Get-ItemProperty -Path $p -ErrorAction SilentlyContinue
+  if ($v -and $v.'(default)') { $result = $v.'(default)'; break }
+}
+if (-not $result) {
+  $ws = New-Object -ComObject WScript.Shell
+  $dirs = @(
+    "$env:USERPROFILE\\Desktop",
+    "$env:PUBLIC\\Desktop",
+    "$env:APPDATA\\Microsoft\\Windows\\Start Menu\\Programs",
+    "$env:ProgramData\\Microsoft\\Windows\\Start Menu\\Programs"
+  )
+  foreach ($d in $dirs) {
+    $files = Get-ChildItem -Path $d -Filter '*.lnk' -Recurse -ErrorAction SilentlyContinue
+    foreach ($f in $files) {
+      try {
+        $t = $ws.CreateShortcut($f.FullName).TargetPath
+        if ($t -and ([IO.Path]::GetFileName($t) -eq $name -or [IO.Path]::GetFileNameWithoutExtension($t) -eq $bare)) {
+          $result = $t; break
+        }
+      } catch {}
+    }
+    if ($result) { break }
+  }
+}
+if ($result) { Write-Output $result }`;
+	try {
+		const out = await runPs(script, 10_000);
+		const hit = out.trim();
+		return hit && hit.toLowerCase().endsWith('.exe') ? hit : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Launch an executable and poll (up to ~6s) until a process with the given
+ * name is actually running. Returns the trimmed PowerShell output. */
+async function launchAndVerify(exePath: string, processName: string): Promise<string> {
+	const pname = processName.toLowerCase().endsWith('.exe') ? processName.slice(0, -4) : processName;
+	const esc = exePath.replace(/'/g, "''");
+	const script = `Start-Process -FilePath '${esc}'
+$deadline = (Get-Date).AddSeconds(6)
+$ok = $false
+do {
+  if (Get-Process -Name '${pname}' -ErrorAction SilentlyContinue) { $ok = $true; break }
+  Start-Sleep -Milliseconds 300
+} while ((Get-Date) -lt $deadline)
+if ($ok) { Write-Output 'STARTED' } else { Write-Output 'NOT_STARTED' }`;
+	const out = await runPs(script, 12_000);
+	return out.trim();
 }
 
 /** Open an installed application by friendly name (Windows via explorer/start or path). */
@@ -79,12 +158,14 @@ export class OpenApplicationTool extends Tool {
 				const uri = candidate[1];
 				const alias = LAUNCH_ALIASES[requested];
 				if (alias) {
-					const proc = await execFile('powershell', [
-						'-NoProfile',
-						'-Command',
-						`Start-Process '${alias[0]}'`
-					]);
-					if (proc.stderr) void proc.stderr;
+					const exe = (await resolveExecutable(alias[0])) ?? alias[0];
+					const out = await launchAndVerify(exe, alias[0]);
+					if (out !== 'STARTED') {
+						return fail(
+							`Failed to open ${requested}: process "${alias[0]}" did not start.`,
+							'launch not verified'
+						);
+					}
 					return ok(`Opened ${requested}`);
 				}
 				void uri;

@@ -3,6 +3,7 @@ import { resolve, join, isAbsolute, relative } from 'node:path';
 import { Tool, ok, fail, requireString } from './base';
 import type { ToolResult } from './base';
 import type { AgentContext } from '../agent/context';
+import { EVENT } from '../../src/lib/shared/events';
 
 // Root that filesystem tools are allowed to operate within. Everything outside
 // is rejected to keep the agent sandboxed to the project workspace.
@@ -67,6 +68,11 @@ export class WriteFileTool extends Tool {
 		try {
 			await mkdir(join(abs, '..'), { recursive: true });
 			await writeFile(abs, content, 'utf8');
+			context.emit(EVENT.FILE_WRITTEN, {
+				path: relative(WORKSPACE_ROOT, abs),
+				content,
+				timestamp: new Date().toISOString()
+			});
 			return ok(`Wrote ${content.length} chars to ${target}.`, {
 				path: relative(WORKSPACE_ROOT, abs)
 			});

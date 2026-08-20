@@ -35,6 +35,7 @@ export interface ToolCallRecord {
 	arguments: Record<string, unknown>;
 	status: 'started' | 'completed' | 'failed';
 	result?: string;
+	data?: unknown;
 }
 
 export interface TaskState {
@@ -66,6 +67,14 @@ export interface LogEntry {
 	level: 'debug' | 'info' | 'warn' | 'error';
 	message: string;
 	tool?: string;
+	task_id?: string;
+	timestamp: string;
+}
+
+/** A file the agent wrote to disk, streamed to the UI for live playback. */
+export interface WrittenFile {
+	path: string;
+	content: string;
 	task_id?: string;
 	timestamp: string;
 }

@@ -27,6 +27,12 @@ describe('Planner', async () => {
 		expect(plan.steps.some((s) => s.tool === 'list_windows')).toBe(true);
 	});
 
+	it('recognizes list_windows for "list open windows"', async () => {
+		const plan = await planner.plan('list open windows');
+		expect(plan.steps.some((s) => s.tool === 'list_windows')).toBe(true);
+		expect(plan.steps.some((s) => s.tool === 'open_application')).toBe(false);
+	});
+
 	it('recognizes write_file with content extraction', async () => {
 		const plan = await planner.plan('create file hello.txt with content test-permission');
 		const step = plan.steps.find((s) => s.tool === 'write_file');
@@ -289,5 +295,174 @@ describe('Planner new behaviors', async () => {
 		expect(await planner.risk('log off')).toBe('high');
 		expect(await planner.risk('sleep')).toBe('low');
 		expect(await planner.risk('play music')).toBe('low');
+	});
+});
+
+describe('Planner extended capabilities', async () => {
+	const planner = new Planner();
+
+	it('routes "open the folder X" to open_path', async () => {
+		const plan = await planner.plan('open the folder src');
+		expect(plan.steps[0].tool).toBe('open_path');
+		expect(plan.steps[0].args.path).toBe('src');
+	});
+
+	it('does not hijack app launches that mention "folder"', async () => {
+		const plan = await planner.plan('open new folder vs code on a new window');
+		expect(plan.steps[0].tool).toBe('open_application');
+		expect(plan.steps[0].args.application).toBe('code');
+	});
+
+	it('routes list directory questions to list_dir', async () => {
+		const plan = await planner.plan('list files in src');
+		expect(plan.steps[0].tool).toBe('list_dir');
+		expect(plan.steps[0].args.path).toBe('src');
+	});
+
+	it('routes "what files are in X" to list_dir', async () => {
+		const plan = await planner.plan('what files are in src');
+		expect(plan.steps[0].tool).toBe('list_dir');
+		expect(plan.steps[0].args.path).toBe('src');
+	});
+
+	it('routes list processes (with filter) to list_processes', async () => {
+		const plain = await planner.plan('what processes are running');
+		expect(plain.steps[0].tool).toBe('list_processes');
+		const filtered = await planner.plan('list processes named chrome');
+		expect(filtered.steps[0].tool).toBe('list_processes');
+		expect(filtered.steps[0].args.filter).toBe('chrome');
+	});
+
+	it('routes volume questions to get_volume', async () => {
+		const plan = await planner.plan('what is the current volume');
+		expect(plan.steps[0].tool).toBe('get_volume');
+	});
+
+	it('routes active-window questions to get_active_window', async () => {
+		const plan = await planner.plan('which window is on top');
+		expect(plan.steps[0].tool).toBe('get_active_window');
+	});
+
+	it('routes remember/recall to the memory tools', async () => {
+		const remember = await planner.plan('remember that my name is jarvis');
+		expect(remember.steps[0].tool).toBe('remember');
+		expect(remember.steps[0].args.content).toBe('my name is jarvis');
+		const recall = await planner.plan('do you remember my birthday');
+		expect(recall.steps[0].tool).toBe('recall');
+		expect(recall.steps[0].args.query).toBe('my birthday');
+	});
+
+	it('routes url reads to read_page instead of read_file', async () => {
+		const plan = await planner.plan('read https://example.com');
+		expect(plan.steps[0].tool).toBe('read_page');
+		expect(plan.steps[0].args.url).toBe('https://example.com');
+	});
+
+	it('routes minimize to minimize_window', async () => {
+		const plan = await planner.plan('minimize the chrome window');
+		expect(plan.steps[0].tool).toBe('minimize_window');
+		expect(plan.steps[0].args.target).toContain('chrome');
+	});
+
+	it('routes notify to show_notification', async () => {
+		const plan = await planner.plan('notify me that the build finished');
+		expect(plan.steps[0].tool).toBe('show_notification');
+		expect(plan.steps[0].args.message).toBe('the build finished');
+	});
+
+	it('routes move/rename to move_file', async () => {
+		const plan = await planner.plan('move hello.txt into docs');
+		expect(plan.steps[0].tool).toBe('move_file');
+		expect(plan.steps[0].args.source).toBe('hello.txt');
+		expect(plan.steps[0].args.destination).toBe('docs');
+	});
+
+	it('routes zip to zip_folder', async () => {
+		const plan = await planner.plan('zip the folder src into backup.zip');
+		expect(plan.steps[0].tool).toBe('zip_folder');
+		expect(plan.steps[0].args.source).toBe('src');
+		expect(plan.steps[0].args.archive).toBe('backup.zip');
+	});
+
+	it('routes delete file to delete_file', async () => {
+		const plan = await planner.plan('delete file temp.txt');
+		expect(plan.steps[0].tool).toBe('delete_file');
+		expect(plan.steps[0].args.path).toBe('temp.txt');
+	});
+
+	it('routes press/scroll to their tools', async () => {
+		const press = await planner.plan('press the tab key');
+		expect(press.steps[0].tool).toBe('press_key');
+		expect(press.steps[0].args.combo).toBe('tab');
+		const scroll = await planner.plan('scroll down 3');
+		expect(scroll.steps[0].tool).toBe('scroll_wheel');
+		expect(scroll.steps[0].args.direction).toBe('down');
+		expect(scroll.steps[0].args.clicks).toBe(3);
+	});
+
+	it('routes fill-field to ui_set_text', async () => {
+		const plan = await planner.plan('type hello into the search field');
+		expect(plan.steps[0].tool).toBe('ui_set_text');
+		expect(plan.steps[0].args.name).toBe('search');
+		expect(plan.steps[0].args.text).toBe('hello');
+	});
+
+	it('keeps plain typing on type_text', async () => {
+		const plan = await planner.plan('type hello world');
+		expect(plan.steps[0].tool).toBe('type_text');
+	});
+});
+
+describe('Planner fuzzy app interpretation', async () => {
+	const planner = new Planner();
+
+	const cases: Array<[string, string]> = [
+		['open telegram', 'telegram'],
+		['open tele gram', 'telegram'],
+		['open telehram', 'telegram'],
+		['open telegrm', 'telegram'],
+		['open chrome', 'chrome'],
+		['open chorme', 'chrome'],
+		['open spotify', 'spotify'],
+		['open spootify', 'spotify'],
+		['open terminal', 'terminal'],
+		['open termianl', 'terminal']
+	];
+
+	it('interprets typos and split words into the canonical app name', async () => {
+		for (const [cmd, app] of cases) {
+			const plan = await planner.plan(cmd);
+			expect(plan.steps[0].tool).toBe('open_application');
+			expect(plan.steps[0].args.application).toBe(app);
+		}
+	});
+});
+
+describe('Planner google accounts', async () => {
+	const planner = new Planner();
+
+	const cases: Array<[string, string]> = [
+		['open shirogami ryuu google account', 'shirogami ryuu'],
+		['open shirogami ryuu google acc', 'shirogami ryuu'],
+		['open google account shirogami ryuu', 'shirogami ryuu'],
+		['switch to shirogami ryuu gmail account', 'shirogami ryuu'],
+		['open my shirogami ryuu gmail acc', 'shirogami ryuu'],
+		['open shirogami.ryuu@gmail.com', 'shirogami.ryuu@gmail.com']
+	];
+
+	it('routes google/gmail account phrases to open_google_account', async () => {
+		for (const [cmd, account] of cases) {
+			const plan = await planner.plan(cmd);
+			expect(plan.steps).toHaveLength(1);
+			expect(plan.steps[0].tool).toBe('open_google_account');
+			expect(plan.steps[0].args.account).toBe(account);
+			expect(plan.steps.some((s) => s.tool === 'open_application')).toBe(false);
+		}
+	});
+
+	it('keeps real app launches on open_application', async () => {
+		const plan = await planner.plan('open chrome');
+		expect(plan.steps[0].tool).toBe('open_application');
+		expect(plan.steps.some((s) => s.tool === 'open_google_account')).toBe(false);
 	});
 });

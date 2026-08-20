@@ -2,6 +2,7 @@ import { Tool, ok, fail, requireString } from './base';
 import type { ToolResult } from './base';
 import type { AgentContext } from '../agent/context';
 import { runPs } from './ps';
+import { sleep } from '../util';
 
 const GET_FG = `Add-Type @"
 using System;
@@ -28,8 +29,8 @@ if ($h -eq [IntPtr]::Zero) { '[]'; exit }
 $root = [System.Windows.Automation.AutomationElement]::FromHandle($h)
 $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 $results = New-Object System.Collections.ArrayList
-$script:maxDepth = 6
-$script:maxCount = 300
+$script:maxDepth = 10
+$script:maxCount = 500
 function Walk($el, $depth) {
   if ($results.Count -ge $script:maxCount) { return }
   if ($depth -gt $script:maxDepth) { return }
@@ -68,6 +69,7 @@ if ($h -eq [IntPtr]::Zero) { 'NO_WINDOW'; exit }
 $root = [System.Windows.Automation.AutomationElement]::FromHandle($h)
 $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
 $script:target = '__TARGET__'
+$script:type = '__TYPE__'
 $script:hit = $null
 function Find($el, $depth) {
   if ($script:hit) { return }
@@ -75,7 +77,11 @@ function Find($el, $depth) {
   try {
     $r = $el.Current.BoundingRectangle
     $n = $el.Current.Name
-    if ($r.Width -gt 0 -and $r.Height -gt 0 -and $n -like "*$script:target*") {
+    $id = $el.Current.AutomationId
+    $t = $el.Current.ControlType.ProgrammaticName -replace '^ControlType\\.',''
+    $nameHit = ($script:target -ne '') -and ($n -like "*$script:target*" -or $id -like "*$script:target*")
+    $typeHit = ($script:type -ne '') -and ($t -like "*$script:type*")
+    if ($r.Width -gt 0 -and $r.Height -gt 0 -and ($nameHit -or $typeHit)) {
       $script:hit = $el
       $script:cx = [int]($r.X + $r.Width / 2)
       $script:cy = [int]($r.Y + $r.Height / 2)
@@ -89,6 +95,13 @@ function Find($el, $depth) {
   } catch { }
 }
 `;
+
+function buildFindScript(target: string, type: string): string {
+	return FIND_TEMPLATE.replace('__TARGET__', target.replace(/'/g, "''")).replace(
+		'__TYPE__',
+		type.replace(/'/g, "''")
+	);
+}
 
 /** List the interactive UI elements (name, type, bounds) of the active window. */
 export class UiListTool extends Tool {
@@ -140,31 +153,43 @@ export class UiClickTool extends Tool {
 			name: 'name',
 			type: 'string',
 			description: 'Visible text label of the control, e.g. "Save", "OK", "Send".'
+		},
+		{
+			name: 'type',
+			type: 'string',
+			description:
+				'Optional UIA control type to match when the label is unknown, e.g. "Edit", "Button".'
 		}
 	] as const;
 
 	async execute(args: Record<string, unknown>, context: AgentContext): Promise<ToolResult> {
 		if (process.platform !== 'win32') return fail('ui_click requires Windows.');
-		const name = requireString(args, 'name', 200);
+		const name = String(args.name ?? '').trim();
+		const type = String(args.type ?? '').trim();
+		if (!name && !type) return fail('Provide a "name" or a "type".', 'missing target');
 		const granted = await context.requestPermission({
 			permission_level: this.permissionLevel,
 			tool: this.name,
-			arguments: { name }
+			arguments: { name, type }
 		});
 		if (!granted) return fail('UI click was denied by the user.');
-		const script = FIND_TEMPLATE.replace('__TARGET__', name.replace(/'/g, "''"))
-			.concat(`\nif (-not $script:hit) { 'NOT_FOUND'; exit }
+		const script = buildFindScript(name, type).concat(`\nif (-not $script:hit) { 'NOT_FOUND'; exit }
 [void][UiClick]::SetCursorPos($script:cx, $script:cy)
 [UiClick]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
 [UiClick]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
 "CLICKED $script:cx,$script:cy"`);
 		try {
-			const out = await runPs(script, 30_000);
+			let out = await runPs(script, 30_000);
+			// The UI may still be rendering right after a window appears; retry a few times.
+			for (let attempt = 1; out.startsWith('NOT_FOUND') && attempt < 3; attempt++) {
+				await sleep(700);
+				out = await runPs(script, 30_000);
+			}
 			if (out.startsWith('NOT_FOUND'))
-				return fail(`No control labeled "${name}" found.`, 'not found');
-			return ok(out || `Clicked "${name}".`);
+				return fail(`No control labeled "${name || type}" found.`, 'not found');
+			return ok(out || `Clicked "${name || type}".`);
 		} catch (err) {
-			return fail(`Failed to click "${name}".`, (err as Error).message);
+			return fail(`Failed to click "${name || type}".`, (err as Error).message);
 		}
 	}
 }
@@ -180,21 +205,27 @@ export class UiSetTextTool extends Tool {
 			type: 'string',
 			description: 'Label of the text field, e.g. "Search", "To", "Name".'
 		},
-		{ name: 'text', type: 'string', description: 'Text to insert.' }
+		{ name: 'text', type: 'string', description: 'Text to insert.' },
+		{
+			name: 'type',
+			type: 'string',
+			description: 'Optional UIA control type to match when the label is unknown, e.g. "Edit".'
+		}
 	] as const;
 
 	async execute(args: Record<string, unknown>, context: AgentContext): Promise<ToolResult> {
 		if (process.platform !== 'win32') return fail('ui_set_text requires Windows.');
-		const name = requireString(args, 'name', 200);
+		const name = String(args.name ?? '').trim();
+		const type = String(args.type ?? '').trim();
 		const text = requireString(args, 'text', 4000);
+		if (!name && !type) return fail('Provide a "name" or a "type".', 'missing target');
 		const granted = await context.requestPermission({
 			permission_level: this.permissionLevel,
 			tool: this.name,
-			arguments: { name, length: text.length }
+			arguments: { name, type, length: text.length }
 		});
 		if (!granted) return fail('Text fill was denied by the user.');
-		const script = FIND_TEMPLATE.replace('__TARGET__', name.replace(/'/g, "''"))
-			.concat(`\nif (-not $script:hit) { 'NOT_FOUND'; exit }
+		const script = buildFindScript(name, type).concat(`\nif (-not $script:hit) { 'NOT_FOUND'; exit }
 $vp = $null
 if ($script:hit.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) {
   $vp.SetValue('${text.replace(/'/g, "''")}')
@@ -203,14 +234,22 @@ if ($script:hit.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::P
   'NO_VALUE_PATTERN'
 }`);
 		try {
-			const out = await runPs(script, 30_000);
+			let out = await runPs(script, 30_000);
+			// The UI may still be rendering right after a window appears; retry a few times.
+			for (let attempt = 1; out.startsWith('NOT_FOUND') && attempt < 3; attempt++) {
+				await sleep(700);
+				out = await runPs(script, 30_000);
+			}
 			if (out.startsWith('NOT_FOUND'))
-				return fail(`No field labeled "${name}" found.`, 'not found');
+				return fail(`No field labeled "${name || type}" found.`, 'not found');
 			if (out.startsWith('NO_VALUE_PATTERN'))
-				return fail(`Field "${name}" does not support direct text entry.`, 'value pattern missing');
-			return ok(`Set "${name}" to "${text.slice(0, 60)}${text.length > 60 ? '…' : ''}".`);
+				return fail(
+					`Field "${name || type}" does not support direct text entry.`,
+					'value pattern missing'
+				);
+			return ok(`Set "${name || type}" to "${text.slice(0, 60)}${text.length > 60 ? '…' : ''}".`);
 		} catch (err) {
-			return fail(`Failed to fill "${name}".`, (err as Error).message);
+			return fail(`Failed to fill "${name || type}".`, (err as Error).message);
 		}
 	}
 }

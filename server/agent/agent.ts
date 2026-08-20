@@ -3,7 +3,8 @@ import type {
 	TaskState,
 	PermissionLevel,
 	ConversationMessage,
-	PlanStep
+	PlanStep,
+	ToolCallRecord
 } from '../../src/lib/shared/types';
 import { EVENT } from '../../src/lib/shared/events';
 import { EventBus } from '../events/bus';
@@ -11,6 +12,8 @@ import { ToolRegistry } from '../tools/registry';
 import { Planner } from './planner';
 import { Executor } from './executor';
 import { RecoveryPlanner } from './recovery';
+import { CommandInterpreter } from './interpreter';
+import { KNOWN_APP_NAMES } from '../tools/windows';
 import { createTask, completeTask, failTask, cancelTask, updateStep } from './state';
 import { PermissionGate } from '../security/permissions';
 import type { Memory } from '../memory/memory';
@@ -46,6 +49,8 @@ export interface AgentDeps {
 	onPermissionRequest: (request: PermissionRequest) => void;
 	/** Multi-model chain (planner → executor → critic → optimizer). Enables the post-execution critique/optimize loop. */
 	chain?: ModelChain;
+	/** AI reasoning interpreter that turns raw text/speech into structured tool calls. */
+	interpreter?: CommandInterpreter;
 	/** Max critique/optimize rounds a task may go through. Defaults to 2. */
 	chainMaxRounds?: number;
 }
@@ -67,6 +72,7 @@ export class Agent {
 	private readonly executor: Executor;
 	private readonly planner: Planner;
 	private readonly recovery: RecoveryPlanner;
+	private readonly interpreter: CommandInterpreter;
 	private readonly chain: ModelChain | undefined;
 	private readonly chainMaxRounds: number;
 
@@ -74,8 +80,9 @@ export class Agent {
 		this.executor = new Executor(deps.registry);
 		this.planner = deps.planner ?? new Planner();
 		this.recovery = new RecoveryPlanner(deps.llm);
+		this.interpreter = deps.interpreter ?? new CommandInterpreter(deps.llm);
 		this.chain = deps.chain;
-		this.chainMaxRounds = deps.chainMaxRounds ?? 2;
+		this.chainMaxRounds = deps.chainMaxRounds ?? 1;
 	}
 
 	getStatus(): AgentStatus {
@@ -179,11 +186,29 @@ export class Agent {
 		// chain's "planner" model is used when available.
 		let plan = (await this.planner.plan(this.task.command)).steps;
 		const isJustChat = plan.length === 1 && plan[0].tool === 'chat';
-		if (isJustChat && this.llmReady()) {
-			const llmPlan = this.chain
-				? await this.chain.plan(this.task.command, this.deps.registry.schema())
-				: await this.llmPlan(this.task.command);
-			if (llmPlan.length) plan = llmPlan;
+		const isUnknownApp = this.isUnknownAppGuess(plan);
+		if (this.llmReady() && (isJustChat || isUnknownApp)) {
+			const interpretation = await this.interpreter.interpret(
+				this.task.command,
+				this.deps.registry.schema()
+			);
+			if (interpretation.steps.length) {
+				const improved = isJustChat || interpretation.steps[0].tool !== plan[0]?.tool;
+				if (improved) {
+					plan = interpretation.steps;
+					this.deps.bus.emitJarvis(
+						EVENT.CHAIN_ACTIVITY,
+						{ role: 'interpreter', message: interpretation.reasoning },
+						taskId
+					);
+					context.log('info', `Interpreted: ${interpretation.reasoning}`, 'interpreter');
+				}
+			} else if (isJustChat) {
+				const llmPlan = this.chain
+					? await this.chain.plan(this.task.command, this.deps.registry.schema())
+					: await this.llmPlan(this.task.command);
+				if (llmPlan.length) plan = llmPlan;
+			}
 		}
 
 		this.task.plan = plan;
@@ -340,11 +365,11 @@ export class Agent {
 		return true;
 	}
 
-	private priorCalls(task: TaskState): { tool: string; result?: string }[] {
+	private priorCalls(task: TaskState): { tool: string; result?: string; data?: unknown }[] {
 		return task.tool_calls
 			.filter((c) => c.status === 'completed')
 			.slice(-8)
-			.map((c) => ({ tool: c.tool, result: c.result }));
+			.map((c) => ({ tool: c.tool, result: c.result, data: c.data }));
 	}
 
 	private failedTools(task: TaskState): string[] {
@@ -391,6 +416,16 @@ export class Agent {
 		if (phrase.split(/\s+/).length > 3) return null;
 		if (/\b(and|then|new|on|a|the)\b/.test(phrase)) return null;
 		return phrase;
+	}
+
+	/** True when the deterministic plan guessed an app name we cannot launch, so the AI interpreter should re-examine it. */
+	private isUnknownAppGuess(plan: PlanStep[]): boolean {
+		if (plan.length !== 1 || plan[0].tool !== 'open_application') return false;
+		const app = String(plan[0].args.application ?? '')
+			.toLowerCase()
+			.trim();
+		if (!app) return false;
+		return !KNOWN_APP_NAMES.some((n) => n.includes(app) || app.includes(n));
 	}
 
 	/** Run the critic → optimizer loop up to {@link chainMaxRounds} times. */
@@ -531,8 +566,101 @@ export class Agent {
 	private summarize(): string {
 		if (!this.task) return '';
 		const done = this.task.tool_calls.filter((c) => c.status === 'completed');
-		const parts = done.map((c) => c.result ?? c.tool).filter(Boolean);
+		const parts = done.map((c) => this.describeResult(c)).filter(Boolean);
 		return parts.length ? parts.join(' | ') : 'Task finished.';
+	}
+
+	private describeResult(call: ToolCallRecord): string {
+		const message = (call.result ?? '').trim();
+		const data = call.data as
+			| {
+					hostname?: string;
+					platform?: string;
+					arch?: string;
+					memory_total?: number;
+					memory_free?: number;
+					memory_used?: number;
+					uptime_seconds?: number;
+					results?: string[];
+					stdout?: string;
+					windows?: string[];
+					apps?: Array<{ name?: string }>;
+					services?: Array<{ name?: string; status?: string }>;
+					processes?: Array<{ name?: string; pid?: number }>;
+					text?: string;
+					value?: string;
+					name?: string;
+					elements?: Array<{ name?: string; type?: string }>;
+			  }
+			| undefined;
+
+		switch (call.tool) {
+			case 'system_info': {
+				if (data?.hostname) {
+					const memTotal = Math.round((data.memory_total ?? 0) / 1024 / 1024 / 1024);
+					const memUsed = Math.round((data.memory_used ?? 0) / 1024 / 1024 / 1024);
+					const hours = Math.floor((data.uptime_seconds ?? 0) / 3600);
+					return (
+						`This is ${data.hostname}, running ${data.platform ?? ''} ${data.arch ?? ''}. ` +
+						`Memory ${memUsed}GB of ${memTotal}GB used, up for about ${hours} hours.`
+					);
+				}
+				return message;
+			}
+			case 'search_files': {
+				const paths = data?.results ?? [];
+				if (paths.length) {
+					const shown = paths.slice(0, 5).join(', ');
+					const more = paths.length > 5 ? ` and ${paths.length - 5} more` : '';
+					return `${message} ${shown}${more}`;
+				}
+				return message;
+			}
+			case 'run_command': {
+				const out = data?.stdout ?? '';
+				if (out) {
+					const lines = out
+						.split('\n')
+						.filter((l) => l.trim())
+						.slice(0, 5)
+						.join(' | ');
+					return `${message} Output: ${lines}`;
+				}
+				return message;
+			}
+			case 'list_windows':
+			case 'list_apps':
+			case 'list_processes':
+			case 'system_services': {
+				const items: Array<string | { name?: string; title?: string; process?: string }> =
+					data?.windows ?? data?.apps ?? data?.services ?? data?.processes ?? [];
+				if (items.length) {
+					const names = items
+						.slice(0, 5)
+						.map((i) => {
+							if (typeof i === 'string') return i;
+							return i.name ?? i.title ?? i.process ?? '?';
+						})
+						.join(', ');
+					return `${message} ${names}`;
+				}
+				return message;
+			}
+			case 'get_env_var': {
+				if (data?.name !== undefined) {
+					return `Environment variable "${data.name}" ${data.value ? `= ${data.value}` : 'is not set'}.`;
+				}
+				return message;
+			}
+			case 'clipboard_read': {
+				if (typeof data?.text === 'string' && data.text) {
+					return `Clipboard: ${data.text.slice(0, 200)}`;
+				}
+				return message;
+			}
+			default:
+				return message;
+		}
 	}
 
 	private makeContext(taskId: string): AgentContext {
@@ -553,7 +681,18 @@ export class Agent {
 			cancel: () => this.cancel(),
 			appendConversation: (role, content) => this.deps.appendConversation(role, content),
 			log: (level, message, tool) =>
-				this.deps.bus.emitJarvis(EVENT.LOGGED, { level, message, tool }, taskId)
+				this.deps.bus.emitJarvis(
+					EVENT.LOGGED,
+					{
+						id: crypto.randomUUID(),
+						level,
+						message,
+						tool,
+						task_id: taskId,
+						timestamp: new Date().toISOString()
+					},
+					taskId
+				)
 		};
 	}
 
